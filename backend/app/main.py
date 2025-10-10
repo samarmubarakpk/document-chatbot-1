@@ -11,8 +11,13 @@ import os
 from app.config import settings
 from app.document_processor import DocumentProcessor
 from app.retrieval_engine import HybridRetriever
+import logging
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 app = FastAPI(title="Intelligent Document Chatbot API")
+
 
 # CORS configuration
 app.add_middleware(
@@ -89,6 +94,10 @@ async def upload_document(file: UploadFile = File(...)):
 async def query_documents(request: QueryRequest):
     """Query the document knowledge base"""
     try:
+        logger.info(f"\n{'='*60}")
+        logger.info(f"QUERY: {request.query}")
+        logger.info(f"{'='*60}")
+        
         # Retrieve relevant chunks
         results = await retriever.retrieve(
             request.query,
@@ -96,11 +105,16 @@ async def query_documents(request: QueryRequest):
             request.document_ids
         )
         
+        logger.info(f"\nRetrieved {len(results)} results")
+        
         # Build context
         context = "\n\n".join([r["text"] for r in results])
         
         # Generate response using GPT-4
         response = await generate_answer(request.query, context, results)
+        
+        logger.info(f"\nGenerated answer ({len(response['answer'])} chars)")
+        logger.info(f"Confidence: {response['confidence']:.2%}")
         
         return QueryResponse(
             answer=response["answer"],
@@ -109,51 +123,109 @@ async def query_documents(request: QueryRequest):
         )
     
     except Exception as e:
+        logger.error(f"Error in query: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
+    
+    
 async def generate_answer(query: str, context: str, sources: List[Dict]) -> Dict:
-    """Generate answer using GPT-4"""
+    """Generate answer using GPT-4 with explicit text+image fusion"""
     openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     
-    prompt = f"""You are an intelligent assistant helping users understand technical documents. 
-    Use the following context to answer the question. Be precise and cite sources.
+    # Separate text and image sources
+    text_sources = [s for s in sources if s['metadata'].get('type') == 'text']
+    image_sources = [s for s in sources if s['metadata'].get('type') == 'image']
     
-    Context:
-    {context}
+    # Build enhanced context
+    enhanced_context = "=== DOCUMENT CONTENT ===\n\n"
     
-    Question: {query}
+    # Group by page for better context
+    page_content = {}
+    for source in sources[:10]:  # Top 10 sources
+        page = source['metadata'].get('page', 0)
+        doc_name = source['metadata'].get('document_name', 'Unknown')
+        source_type = source['metadata'].get('type', 'text')
+        
+        page_key = f"{doc_name}_Page{page}"
+        if page_key not in page_content:
+            page_content[page_key] = {
+                'text': [],
+                'images': []
+            }
+        
+        if source_type == 'text':
+            page_content[page_key]['text'].append(source['text'])
+        else:
+            page_content[page_key]['images'].append(source['text'])
     
-    Instructions:
-    1. Provide a comprehensive answer based on the context
-    2. If the context doesn't contain enough information, say so
-    3. Reference specific documents and page numbers when possible
-    4. For technical diagrams or images mentioned, describe their relevance
-    """
+    # Build context with page grouping
+    for page_key, content in page_content.items():
+        enhanced_context += f"\n## {page_key}\n"
+        
+        if content['text']:
+            enhanced_context += "\n**Text Content:**\n"
+            for text in content['text']:
+                enhanced_context += f"- {text}\n"
+        
+        if content['images']:
+            enhanced_context += "\n**Images/Diagrams on this page:**\n"
+            for img_desc in content['images']:
+                enhanced_context += f"- {img_desc}\n"
+        
+        enhanced_context += "\n"
+    
+    prompt = f"""You are a technical documentation expert helping users understand network design documents.
+
+CRITICAL INSTRUCTIONS:
+1. Prioritize SPECIFIC details (model numbers, exact specs) over generic descriptions
+2. When both text and image descriptions exist for the same page, COMBINE them
+3. For hardware questions, always mention the EXACT model numbers if available
+4. Be concise but complete - include all relevant technical details
+
+Context:
+{enhanced_context}
+
+Question: {query}
+
+Instructions:
+- Provide a direct, accurate answer based on the context
+- Cite specific page numbers when referencing information
+- If technical specs are mentioned (model numbers, speeds, etc.), include them
+- If images contain additional details, mention what they show
+- Keep the answer focused and avoid unnecessary elaboration
+"""
     
     response = await openai_client.chat.completions.create(
         model=settings.OPENAI_MODEL,
         messages=[
-            {"role": "system", "content": "You are a technical documentation expert."},
+            {"role": "system", "content": "You are a precise technical documentation expert. Always include specific model numbers, specs, and technical details when available."},
             {"role": "user", "content": prompt}
         ],
-        temperature=0.3,
+        temperature=0.1,  # Lower temperature for more factual responses
         max_tokens=1000
     )
     
     # Extract source information
     source_info = []
+    seen_pages = set()
+    
     for source in sources[:5]:  # Top 5 sources
-        source_info.append({
-            "document": source["metadata"]["document_name"],
-            "page": source["metadata"]["page"],
-            "type": source["metadata"]["type"],
-            "relevance_score": source["final_score"]
-        })
+        page = source['metadata'].get('page', 0)
+        doc_name = source['metadata'].get('document_name', 'Unknown')
+        page_key = f"{doc_name}_Page{page}"
+        
+        if page_key not in seen_pages:
+            seen_pages.add(page_key)
+            source_info.append({
+                "document": doc_name,
+                "page": page,
+                "type": source['metadata'].get('type', 'text'),
+                "relevance_score": source.get("final_score", 0)
+            })
     
     return {
         "answer": response.choices[0].message.content,
         "sources": source_info,
-        "confidence": float(np.mean([s["final_score"] for s in sources[:5]]))
+        "confidence": float(np.mean([s.get("final_score", 0) for s in sources[:5]]))
     }
 
 @app.get("/health")

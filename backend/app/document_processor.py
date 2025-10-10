@@ -110,65 +110,94 @@ class DocumentProcessor:
                     "type": "text"
                 })
             
-            # Extract images - COMMENT THIS OUT FOR NOW!
-            print(f"  - Skipping images for faster processing")
-            # image_list = page.get_images()
-            # print(f"  - Found {len(image_list)} images")
-            # for img_index, img in enumerate(image_list):
-            #     print(f"    - Processing image {img_index + 1}/{len(image_list)}...")
-            #     xref = img[0]
-            #     pix = fitz.Pixmap(pdf_document, xref)
-            #     if pix.n - pix.alpha < 4:
-            #         image_analysis = await self.analyze_image_with_vision(pix.tobytes())
-            #         content["images"].append({
-            #             "page": page_num,
-            #             "index": img_index,
-            #             "analysis": image_analysis,
-            #             "type": "image"
-            #         })
-            #     pix = None
+            # Extract images
+            image_list = page.get_images()
+            print(f"  - Found {len(image_list)} images")
+
+            for img_index, img in enumerate(image_list):
+                print(f"    - Processing image {img_index + 1}/{len(image_list)}...")
+                try:
+                    xref = img[0]
+                    pix = fitz.Pixmap(pdf_document, xref)
+                    
+                    if pix.n - pix.alpha < 4:  # GRAY or RGB
+                        print(f"      → Valid image format (colorspace: {pix.n})")
+                        # Analyze image with GPT-4 Vision
+                        image_analysis = await self.analyze_image_with_vision(pix.tobytes())
+                        print(f"      → Analysis type: {image_analysis['type']}")
+                        
+                        content["images"].append({
+                            "page": page_num,
+                            "index": img_index,
+                            "analysis": image_analysis,
+                            "type": "image"
+                        })
+                        print(f"      → ✅ Image added to content")
+                    else:
+                        print(f"      → Skipping (unsupported colorspace: {pix.n})")
+                    
+                    pix = None
+                    
+                except Exception as e:
+                    print(f"      → ❌ Error processing image: {str(e)}")
+                    continue
         
+        # CRITICAL: Return the content!
         print("PDF processing complete!")
         pdf_document.close()
-        return content
-    
+        return content  # ← ADD THIS LINE!
     
     async def analyze_image_with_vision(self, image_bytes: bytes) -> Dict[str, Any]:
         """Analyze image using GPT-4 Vision"""
         import base64
         
-        base64_image = base64.b64encode(image_bytes).decode('utf-8')
-        
-        response = await self.openai_client.chat.completions.create(
-            model=settings.OPENAI_VISION_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are analyzing technical diagrams and images from documents. Describe what you see, identify any diagrams, flowcharts, network diagrams, or technical illustrations. Extract all text and relationships visible."
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Analyze this image and describe its contents, especially if it's a technical diagram."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
+        try:
+            print(f"      → Encoding image (size: {len(image_bytes)} bytes)...")
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            print(f"      → Base64 size: {len(base64_image)} chars")
+            
+            print(f"      → Calling GPT-4o Vision API...")
+            response = await self.openai_client.chat.completions.create(
+                model=settings.OPENAI_VISION_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are analyzing technical diagrams and images from documents. Describe what you see, identify any diagrams, flowcharts, network diagrams, or technical illustrations. Extract all text and relationships visible."
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Analyze this image and describe its contents, especially if it's a technical diagram."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                }
                             }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=500
-        )
-        
-        return {
-            "description": response.choices[0].message.content,
-            "type": self.classify_image_type(response.choices[0].message.content)
-        }
+                        ]
+                    }
+                ],
+                max_tokens=500
+            )
+            
+            description = response.choices[0].message.content
+            print(f"      → ✅ Got vision response: {description[:100]}...")
+            
+            return {
+                "description": description,
+                "type": self.classify_image_type(description)
+            }
+            
+        except Exception as e:
+            print(f"      → ❌ ERROR in vision analysis: {str(e)}")
+            # Return a fallback instead of failing
+            return {
+                "description": f"[Image could not be analyzed: {str(e)}]",
+                "type": "general_image"
+            }
     
     def classify_image_type(self, description: str) -> str:
         """Classify image type based on description"""
@@ -186,24 +215,37 @@ class DocumentProcessor:
     
     async def create_smart_chunks(self, content: Dict[str, Any], document_id: str) -> List[Dict]:
         """Create intelligent chunks with context preservation"""
+        print(f"\n=== Creating Smart Chunks ===")
         chunks = []
         chunk_id = 0
         
         # Process text chunks
-        for text_item in content.get("text", []):
+        text_items = content.get("text", [])
+        print(f"Processing {len(text_items)} text items...")
+        
+        for text_item in text_items:
+            print(f"  → Chunking page {text_item['page']}...")
             text_chunks = self.chunk_text(
                 text_item["content"],
                 text_item["page"],
                 chunk_id,
                 document_id
             )
+            print(f"    ✅ Created {len(text_chunks)} text chunks from page {text_item['page']}")
             chunks.extend(text_chunks)
             chunk_id += len(text_chunks)
         
+        print(f"\nText chunks total: {len(chunks)}")
+        
         # Process image descriptions
-        for image_item in content.get("images", []):
+        print(f"\n--- Processing Image Chunks ---")
+        image_items = content.get("images", [])
+        print(f"Found {len(image_items)} images to process")
+        
+        for image_item in image_items:
+            print(f"  → Creating chunk for image on page {image_item['page']}...")
             chunk = {
-                "chunk_id": str(uuid.uuid4()),  # ← CHANGED: Use UUID instead
+                "chunk_id": str(uuid.uuid4()),
                 "document_id": document_id,
                 "content": image_item["analysis"]["description"],
                 "type": "image",
@@ -214,10 +256,15 @@ class DocumentProcessor:
                 }
             }
             chunks.append(chunk)
+            print(f"    ✅ Image chunk created (content length: {len(image_item['analysis']['description'])} chars)")
             chunk_id += 1
         
+        print(f"\n✅ Total chunks created: {len(chunks)}")
+        print(f"   - Text chunks: {len([c for c in chunks if c['type'] == 'text'])}")
+        print(f"   - Image chunks: {len([c for c in chunks if c['type'] == 'image'])}")
+        
         return chunks
-    
+
     def chunk_text(self, text: str, page: int, start_chunk_id: int, document_id: str) -> List[Dict]:
         """Chunk text with overlap"""
         tokens = self.tokenizer.encode(text)
@@ -228,7 +275,7 @@ class DocumentProcessor:
             chunk_text = self.tokenizer.decode(chunk_tokens)
             
             chunks.append({
-                "chunk_id": str(uuid.uuid4()),  # ← CHANGED: Use UUID instead
+                "chunk_id": str(uuid.uuid4()),
                 "document_id": document_id,
                 "content": chunk_text,
                 "type": "text",

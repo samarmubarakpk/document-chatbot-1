@@ -30,7 +30,7 @@ class HybridRetriever:
         top_k: int = 10,
         document_filter: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Advanced hybrid retrieval with reranking"""
+        """Advanced hybrid retrieval with reranking and page-aware boosting"""
         
         # Check cache first
         cache_key = self._get_cache_key(query, top_k, document_filter)
@@ -53,51 +53,132 @@ class HybridRetriever:
                 ]
             )
         
-        # Dense retrieval
+        # Dense retrieval - get MORE results for better reranking
         search_results = await self.qdrant_client.search(
             collection_name="documents",
             query_vector=query_embedding,
-            limit=top_k * 3,  # Get more for reranking
+            limit=top_k * 5,  # Get 5x more for better page grouping
             query_filter=search_filter
         )
         
-        # Extract texts and metadata
+        # Extract candidates
         candidates = []
         for result in search_results:
             candidates.append({
                 "id": result.id,
                 "text": result.payload["text"],
                 "score": result.score,
-                "metadata": result.payload
+                "metadata": result.payload,
+                "page": result.payload.get("page", 0),
+                "type": result.payload.get("type", "text"),
+                "document_name": result.payload.get("document_name", "")
             })
         
+        print(f"\n=== Retrieved {len(candidates)} initial candidates ===")
+        
+        # GROUP BY PAGE - This is the KEY fix!
+        page_groups = {}
+        for candidate in candidates:
+            doc_page_key = f"{candidate['document_name']}_{candidate['page']}"
+            if doc_page_key not in page_groups:
+                page_groups[doc_page_key] = []
+            page_groups[doc_page_key].append(candidate)
+        
+        print(f"Grouped into {len(page_groups)} page groups")
+        
+        # BOOST: Combine scores for chunks from the same page
+        page_scores = {}
+        for doc_page_key, chunks in page_groups.items():
+            # Calculate combined score
+            text_chunks = [c for c in chunks if c['type'] == 'text']
+            image_chunks = [c for c in chunks if c['type'] == 'image']
+            
+            # Average score of all chunks on this page
+            avg_score = sum(c['score'] for c in chunks) / len(chunks)
+            
+            # BOOST if page has BOTH text AND images
+            page_diversity_boost = 0.15 if (text_chunks and image_chunks) else 0
+            
+            # BOOST if multiple chunks from same page (indicates relevance)
+            multi_chunk_boost = min(len(chunks) * 0.05, 0.2)  # Max 20% boost
+            
+            page_scores[doc_page_key] = {
+                'base_score': avg_score,
+                'diversity_boost': page_diversity_boost,
+                'multi_chunk_boost': multi_chunk_boost,
+                'final_score': avg_score + page_diversity_boost + multi_chunk_boost,
+                'chunks': chunks,
+                'page': chunks[0]['page'],
+                'document': chunks[0]['document_name']
+            }
+        
+        # Sort pages by score
+        sorted_pages = sorted(
+            page_scores.items(), 
+            key=lambda x: x[1]['final_score'], 
+            reverse=True
+        )
+        
+        print(f"\n=== Top 5 Pages by Score ===")
+        for i, (doc_page_key, page_data) in enumerate(sorted_pages[:5], 1):
+            print(f"{i}. {page_data['document']} Page {page_data['page']}")
+            print(f"   Score: {page_data['final_score']:.4f} (base: {page_data['base_score']:.4f}, "
+                f"diversity: +{page_data['diversity_boost']:.4f}, multi: +{page_data['multi_chunk_boost']:.4f})")
+            print(f"   Chunks: {len(page_data['chunks'])} "
+                f"({len([c for c in page_data['chunks'] if c['type']=='text'])} text, "
+                f"{len([c for c in page_data['chunks'] if c['type']=='image'])} image)")
+        
+        # Flatten back to chunks, but in page-grouped order
+        reordered_candidates = []
+        for doc_page_key, page_data in sorted_pages:
+            # Sort chunks within page: text chunks first (they have specific details)
+            page_chunks = sorted(
+                page_data['chunks'], 
+                key=lambda x: (x['type'] != 'text', -x['score'])  # Text first, then by score
+            )
+            reordered_candidates.extend(page_chunks)
+        
         # Rerank with cross-encoder
-        if candidates:
-            texts = [c["text"] for c in candidates]
+        if reordered_candidates:
+            # Take top candidates for reranking
+            candidates_to_rerank = reordered_candidates[:top_k * 3]
+            texts = [c["text"] for c in candidates_to_rerank]
+            
+            print(f"\n=== Reranking {len(candidates_to_rerank)} candidates ===")
+            
             rerank_scores = self.reranker.predict(
                 [(query, text) for text in texts]
             )
             
             # Combine scores
-            for i, candidate in enumerate(candidates):
+            for i, candidate in enumerate(candidates_to_rerank):
                 candidate["rerank_score"] = float(rerank_scores[i])
+                # Weight: 30% original embedding score + 70% reranker score
                 candidate["final_score"] = (
                     0.3 * candidate["score"] + 
                     0.7 * candidate["rerank_score"]
                 )
             
-            # Sort by final score
-            candidates.sort(key=lambda x: x["final_score"], reverse=True)
-            candidates = candidates[:top_k]
+            # Final sort by combined score
+            candidates_to_rerank.sort(key=lambda x: x["final_score"], reverse=True)
+            final_candidates = candidates_to_rerank[:top_k]
+        else:
+            final_candidates = []
+        
+        print(f"\n=== Final Top {len(final_candidates)} Results ===")
+        for i, candidate in enumerate(final_candidates, 1):
+            print(f"{i}. [{candidate['type']}] Page {candidate['page']} - "
+                f"Score: {candidate['final_score']:.4f} - "
+                f"{candidate['text'][:80]}...")
         
         # Cache results
         self.redis_client.setex(
             cache_key,
             3600,  # 1 hour TTL
-            json.dumps(candidates)
+            json.dumps(final_candidates)
         )
         
-        return candidates
+        return final_candidates
     
     async def _get_embedding(self, text: str) -> List[float]:
         """Generate embedding for text"""
