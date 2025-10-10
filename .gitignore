@@ -1,0 +1,41 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*.log
+backend/.env
+
+
+# ---- Virtual Environments ----
+env/
+env-cb/
+.venv/
+venv/
+ENV/
+env*/ 
+.env/
+
+# ---- Node / Frontend ----
+node_modules/
+dist/
+build/
+.cache/
+
+# ---- Docker volumes ----
+docker/qdrant_storage/
+docker/qdrant_data/
+*.pid
+
+# ---- VS Code ----
+.vscode/
+
+# ---- System ----
+.DS_Store
+Thumbs.db
+# In your .gitignore file
+.env
+backend/.env
+"backend/.env" 
