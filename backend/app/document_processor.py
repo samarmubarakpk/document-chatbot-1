@@ -14,6 +14,7 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 import tiktoken
 from minio import Minio
 import json
+import uuid
 
 from app.config import settings  # Import the instance, not the class!
 
@@ -83,10 +84,12 @@ class DocumentProcessor:
             "chunks_created": len(chunks),
             "status": "success"
         }
-    
     async def process_pdf(self, file_path: str) -> Dict[str, Any]:
         """Extract text and images from PDF"""
+        print(f"Opening PDF: {file_path}")
         pdf_document = fitz.open(file_path)
+        print(f"PDF has {len(pdf_document)} pages")
+        
         content = {
             "text": [],
             "images": [],
@@ -95,33 +98,40 @@ class DocumentProcessor:
         }
         
         for page_num, page in enumerate(pdf_document, 1):
+            print(f"Processing page {page_num}/{len(pdf_document)}...")
+            
             # Extract text
             text = page.get_text()
             if text.strip():
+                print(f"  - Extracted {len(text)} characters of text")
                 content["text"].append({
                     "page": page_num,
                     "content": text,
                     "type": "text"
                 })
             
-            # Extract images
-            image_list = page.get_images()
-            for img_index, img in enumerate(image_list):
-                xref = img[0]
-                pix = fitz.Pixmap(pdf_document, xref)
-                if pix.n - pix.alpha < 4:  # GRAY or RGB
-                    # Analyze image with GPT-4 Vision
-                    image_analysis = await self.analyze_image_with_vision(pix.tobytes())
-                    content["images"].append({
-                        "page": page_num,
-                        "index": img_index,
-                        "analysis": image_analysis,
-                        "type": "image"
-                    })
-                pix = None
+            # Extract images - COMMENT THIS OUT FOR NOW!
+            print(f"  - Skipping images for faster processing")
+            # image_list = page.get_images()
+            # print(f"  - Found {len(image_list)} images")
+            # for img_index, img in enumerate(image_list):
+            #     print(f"    - Processing image {img_index + 1}/{len(image_list)}...")
+            #     xref = img[0]
+            #     pix = fitz.Pixmap(pdf_document, xref)
+            #     if pix.n - pix.alpha < 4:
+            #         image_analysis = await self.analyze_image_with_vision(pix.tobytes())
+            #         content["images"].append({
+            #             "page": page_num,
+            #             "index": img_index,
+            #             "analysis": image_analysis,
+            #             "type": "image"
+            #         })
+            #     pix = None
         
+        print("PDF processing complete!")
         pdf_document.close()
         return content
+    
     
     async def analyze_image_with_vision(self, image_bytes: bytes) -> Dict[str, Any]:
         """Analyze image using GPT-4 Vision"""
@@ -193,7 +203,7 @@ class DocumentProcessor:
         # Process image descriptions
         for image_item in content.get("images", []):
             chunk = {
-                "chunk_id": f"{document_id}_{chunk_id}",
+                "chunk_id": str(uuid.uuid4()),  # ← CHANGED: Use UUID instead
                 "document_id": document_id,
                 "content": image_item["analysis"]["description"],
                 "type": "image",
@@ -218,7 +228,7 @@ class DocumentProcessor:
             chunk_text = self.tokenizer.decode(chunk_tokens)
             
             chunks.append({
-                "chunk_id": f"{document_id}_{start_chunk_id + len(chunks)}",
+                "chunk_id": str(uuid.uuid4()),  # ← CHANGED: Use UUID instead
                 "document_id": document_id,
                 "content": chunk_text,
                 "type": "text",
