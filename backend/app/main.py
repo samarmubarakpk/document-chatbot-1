@@ -132,11 +132,28 @@ async def generate_answer(query: str, context: str, sources: List[Dict]) -> Dict
     openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     
     # Separate text and image sources
-    text_sources = [s for s in sources if s['metadata'].get('type') == 'text']
+    text_sources = [s for s in sources if s['metadata'].get('type') in ['text', 'hardware_spec']]
     image_sources = [s for s in sources if s['metadata'].get('type') == 'image']
+    hardware_sources = [s for s in sources if s['metadata'].get('section_type') == 'hardware']
+    
+    # Extract ALL model numbers from sources
+    all_model_numbers = []
+    for source in sources:
+        models = source['metadata'].get('model_numbers', [])
+        all_model_numbers.extend(models)
+    
+    # Remove duplicates
+    all_model_numbers = list(set(all_model_numbers))
     
     # Build enhanced context
     enhanced_context = "=== DOCUMENT CONTENT ===\n\n"
+    
+    # CRITICAL: Show model numbers upfront if they exist
+    if all_model_numbers:
+        enhanced_context += "⚠️ IMPORTANT - MODEL NUMBERS FOUND IN DOCUMENT:\n"
+        for model in all_model_numbers:
+            enhanced_context += f"  • {model}\n"
+        enhanced_context += "\n"
     
     # Group by page for better context
     page_content = {}
@@ -144,64 +161,87 @@ async def generate_answer(query: str, context: str, sources: List[Dict]) -> Dict
         page = source['metadata'].get('page', 0)
         doc_name = source['metadata'].get('document_name', 'Unknown')
         source_type = source['metadata'].get('type', 'text')
+        is_hardware = source['metadata'].get('section_type') == 'hardware'
         
         page_key = f"{doc_name}_Page{page}"
         if page_key not in page_content:
             page_content[page_key] = {
                 'text': [],
+                'hardware': [],
                 'images': []
             }
         
-        if source_type == 'text':
+        if is_hardware or source_type == 'hardware_spec':
+            page_content[page_key]['hardware'].append(source['text'])
+        elif source_type == 'text':
             page_content[page_key]['text'].append(source['text'])
         else:
             page_content[page_key]['images'].append(source['text'])
     
-    # Build context with page grouping
+    # Build context with clear separation
     for page_key, content in page_content.items():
         enhanced_context += f"\n## {page_key}\n"
         
-        if content['text']:
-            enhanced_context += "\n**Text Content:**\n"
-            for text in content['text']:
-                enhanced_context += f"- {text}\n"
+        # HARDWARE SPECS FIRST (highest priority)
+        if content['hardware']:
+            enhanced_context += "\n**🔧 HARDWARE SPECIFICATIONS:**\n"
+            for hw_text in content['hardware']:
+                enhanced_context += f"{hw_text}\n\n"
         
+        # Then text content
+        if content['text']:
+            enhanced_context += "\n**📄 Text Content:**\n"
+            for text in content['text']:
+                enhanced_context += f"{text}\n\n"
+        
+        # Images last
         if content['images']:
-            enhanced_context += "\n**Images/Diagrams on this page:**\n"
+            enhanced_context += "\n**🖼️ Images/Diagrams on this page:**\n"
             for img_desc in content['images']:
                 enhanced_context += f"- {img_desc}\n"
         
-        enhanced_context += "\n"
+        enhanced_context += "\n" + "-"*80 + "\n"
     
-    prompt = f"""You are a technical documentation expert helping users understand network design documents.
+    # Build strict prompt
+    prompt = f"""You are a technical documentation expert analyzing network design documents.
 
-CRITICAL INSTRUCTIONS:
-1. Prioritize SPECIFIC details (model numbers, exact specs) over generic descriptions
-2. When both text and image descriptions exist for the same page, COMBINE them
-3. For hardware questions, always mention the EXACT model numbers if available
-4. Be concise but complete - include all relevant technical details
+⚠️ CRITICAL INSTRUCTIONS - READ CAREFULLY:
 
-Context:
+1. The context below contains REAL information extracted from the document
+2. If model numbers, specifications, or technical details appear in the context, YOU MUST use them
+3. NEVER say information is "not provided" if it EXISTS in the context
+4. When hardware specifications are marked with 🔧, they contain exact technical details
+5. Prioritize hardware specifications over image descriptions
+6. Always cite the specific page where you found information
+
+QUESTION: {query}
+
+CONTEXT FROM DOCUMENT:
 {enhanced_context}
 
-Question: {query}
+YOUR TASK:
+- Answer the question using ONLY the information in the context above
+- If model numbers or specifications are shown in the context, include them in your answer
+- If images describe hardware, cross-reference with hardware specifications from the same page
+- Be specific and technical - use exact model numbers and specifications
+- Cite page numbers
 
-Instructions:
-- Provide a direct, accurate answer based on the context
-- Cite specific page numbers when referencing information
-- If technical specs are mentioned (model numbers, speeds, etc.), include them
-- If images contain additional details, mention what they show
-- Keep the answer focused and avoid unnecessary elaboration
-"""
+Answer:"""
     
     response = await openai_client.chat.completions.create(
         model=settings.OPENAI_MODEL,
         messages=[
-            {"role": "system", "content": "You are a precise technical documentation expert. Always include specific model numbers, specs, and technical details when available."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system", 
+                "content": "You are a precise technical expert. When analyzing context, you extract and use ALL available technical specifications. You NEVER claim information is missing if it exists in the provided context. You prioritize explicit specifications over generic descriptions."
+            },
+            {
+                "role": "user", 
+                "content": prompt
+            }
         ],
-        temperature=0.1,  # Lower temperature for more factual responses
-        max_tokens=1000
+        temperature=0.0,  # Maximum factual accuracy
+        max_tokens=1500
     )
     
     # Extract source information

@@ -224,16 +224,42 @@ class DocumentProcessor:
         print(f"Processing {len(text_items)} text items...")
         
         for text_item in text_items:
-            print(f"  → Chunking page {text_item['page']}...")
-            text_chunks = self.chunk_text(
-                text_item["content"],
-                text_item["page"],
-                chunk_id,
-                document_id
-            )
-            print(f"    ✅ Created {len(text_chunks)} text chunks from page {text_item['page']}")
-            chunks.extend(text_chunks)
-            chunk_id += len(text_chunks)
+            page = text_item["page"]
+            text_content = text_item["content"]
+            
+            print(f"  → Processing page {page}...")
+            
+            # ENHANCED: Check if this is a hardware specification section
+            if self._is_hardware_section(text_content):
+                print(f"    ⚡ HARDWARE SECTION DETECTED - keeping together")
+                # Keep hardware sections together without splitting
+                chunk = {
+                    "chunk_id": str(uuid.uuid4()),
+                    "document_id": document_id,
+                    "content": text_content,
+                    "type": "hardware_spec",  # Special type for hardware specs
+                    "page": page,
+                    "metadata": {
+                        "token_count": len(self.tokenizer.encode(text_content)),
+                        "section_type": "hardware",
+                        "contains_specs": True,
+                        "model_numbers": self._extract_model_numbers(text_content)
+                    }
+                }
+                chunks.append(chunk)
+                print(f"    ✅ Created hardware spec chunk with models: {chunk['metadata']['model_numbers']}")
+                chunk_id += 1
+            else:
+                # Use standard chunking for other text
+                text_chunks = self.chunk_text(
+                    text_content,
+                    page,
+                    chunk_id,
+                    document_id
+                )
+                print(f"    ✅ Created {len(text_chunks)} standard text chunks from page {page}")
+                chunks.extend(text_chunks)
+                chunk_id += len(text_chunks)
         
         print(f"\nText chunks total: {len(chunks)}")
         
@@ -261,9 +287,72 @@ class DocumentProcessor:
         
         print(f"\n✅ Total chunks created: {len(chunks)}")
         print(f"   - Text chunks: {len([c for c in chunks if c['type'] == 'text'])}")
+        print(f"   - Hardware spec chunks: {len([c for c in chunks if c['type'] == 'hardware_spec'])}")
         print(f"   - Image chunks: {len([c for c in chunks if c['type'] == 'image'])}")
         
         return chunks
+
+    def _is_hardware_section(self, text: str) -> bool:
+        """Detect if text is a hardware specification section"""
+        text_lower = text.lower()
+        
+        # Count hardware-related indicators
+        indicators = {
+            'hardware': 'hardware' in text_lower,
+            'cisco': 'cisco' in text_lower,
+            'catalyst': 'catalyst' in text_lower,
+            'switch': 'switch' in text_lower or 'switches' in text_lower,
+            'router': 'router' in text_lower or 'routers' in text_lower,
+            'model': 'model' in text_lower,
+            'chassis': 'chassis' in text_lower,
+            'supervisor': 'supervisor' in text_lower,
+            'port': 'port' in text_lower or 'ports' in text_lower,
+            'gbps': 'gbps' in text_lower or 'gigabit' in text_lower,
+            'recommended': 'recommended' in text_lower,
+            'specification': 'specification' in text_lower or 'specs' in text_lower
+        }
+        
+        # If 4 or more indicators are present, it's likely a hardware section
+        match_count = sum(indicators.values())
+        
+        if match_count >= 4:
+            print(f"    🎯 Hardware section detected ({match_count}/12 indicators)")
+            return True
+        
+        return False
+
+    def _extract_model_numbers(self, text: str) -> List[str]:
+        """Extract Cisco model numbers from text"""
+        import re
+        
+        models = []
+        
+        # Pattern 1: Catalyst followed by model number (e.g., "Catalyst 9407R", "Catalyst 9300-48P")
+        pattern1 = r'Catalyst\s+(\d{4}[A-Z]?(?:-\d+[A-Z]+)?)'
+        matches1 = re.findall(pattern1, text, re.IGNORECASE)
+        models.extend([f"Catalyst {m}" for m in matches1])
+        
+        # Pattern 2: Cisco followed by Catalyst and model
+        pattern2 = r'Cisco\s+Catalyst\s+(\d{4}[A-Z]?(?:-\d+[A-Z]+)?)'
+        matches2 = re.findall(pattern2, text, re.IGNORECASE)
+        models.extend([f"Cisco Catalyst {m}" for m in matches2])
+        
+        # Pattern 3: Standalone model numbers (e.g., "9407R", "9300-48P")
+        pattern3 = r'\b(\d{4}[A-Z]?(?:-\d+[A-Z]+)?)\b'
+        matches3 = re.findall(pattern3, text)
+        # Filter to likely Cisco models (4 digits starting with 9, 3, 2, or 1)
+        models.extend([m for m in matches3 if m[0] in '9321' and len(m) >= 4])
+        
+        # Remove duplicates while preserving order
+        unique_models = []
+        seen = set()
+        for model in models:
+            model_clean = model.strip()
+            if model_clean and model_clean not in seen:
+                unique_models.append(model_clean)
+                seen.add(model_clean)
+        
+        return unique_models
 
     def chunk_text(self, text: str, page: int, start_chunk_id: int, document_id: str) -> List[Dict]:
         """Chunk text with overlap"""
