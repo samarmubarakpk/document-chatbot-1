@@ -36,22 +36,37 @@ class DocumentProcessor:
         self.tokenizer = tiktoken.encoding_for_model(settings.OPENAI_MODEL)
         
     async def initialize_collections(self):
-        """Initialize Qdrant collections"""
+        """Initialize Qdrant collections - only create if they don't exist"""
         collections = {
             "documents": {
-                "size": 3072,  # text-embedding-3-large dimension
+                "size": 3072,
                 "distance": Distance.COSINE
             }
         }
         
         for collection_name, config in collections.items():
-            await self.qdrant_client.recreate_collection(
-                collection_name=collection_name,
-                vectors_config=VectorParams(
-                    size=config["size"],
-                    distance=config["distance"]
+            # Check if collection exists
+            try:
+                existing_collections = await self.qdrant_client.get_collections()
+                collection_names = [col.name for col in existing_collections.collections]
+                
+                if collection_name in collection_names:
+                    print(f"✅ Collection '{collection_name}' already exists - skipping creation")
+                    continue
+                
+                print(f"📦 Creating new collection '{collection_name}'")
+                await self.qdrant_client.create_collection(  # Use create_collection, not recreate
+                    collection_name=collection_name,
+                    vectors_config=VectorParams(
+                        size=config["size"],
+                        distance=config["distance"]
+                    )
                 )
-            )
+                print(f"✅ Collection '{collection_name}' created successfully")
+                
+            except Exception as e:
+                print(f"❌ Error initializing collection '{collection_name}': {str(e)}")
+                raise
     
     async def process_document(self, file_path: str, document_name: str) -> Dict[str, Any]:
         """Main document processing pipeline"""
@@ -250,7 +265,7 @@ KEY_ELEMENTS: [important elements, model numbers, labels if YES]"""
                         ]
                     }
                 ],
-                max_tokens=800
+                max_tokens=1200
             )
             
             response_text = response.choices[0].message.content

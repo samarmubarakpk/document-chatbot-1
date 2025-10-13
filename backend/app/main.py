@@ -279,10 +279,18 @@ Answer:"""
                 **extra_info
             })
     
+    # Calculate confidence safely (handle empty sources and NaN)
+    scores = [s.get("final_score", 0) for s in sources[:5]]
+    confidence = float(np.mean(scores)) if scores else 0.0
+    
+    # Sanitize NaN values
+    if np.isnan(confidence):
+        confidence = 0.0
+    
     return {
         "answer": response.choices[0].message.content,
         "sources": source_info,
-        "confidence": float(np.mean([s.get("final_score", 0) for s in sources[:5]]))
+        "confidence": confidence
     }
 
 @app.get("/health")
