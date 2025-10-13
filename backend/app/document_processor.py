@@ -1,4 +1,4 @@
-# document_processor.py
+# document_processor.py - Enhanced with Full Page Visual Analysis
 import hashlib
 import asyncio
 from typing import List, Dict, Any, Optional
@@ -15,33 +15,31 @@ import tiktoken
 from minio import Minio
 import json
 import uuid
+import base64
+import io
 
-from app.config import settings  # Import the instance, not the class!
+from app.config import settings
 
 class DocumentProcessor:
     def __init__(self):
-        self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)  # ← lowercase!
+        self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         self.qdrant_client = AsyncQdrantClient(
-            host=settings.QDRANT_HOST,      # ← lowercase!
-            port=settings.QDRANT_PORT       # ← lowercase!
+            host=settings.QDRANT_HOST,
+            port=settings.QDRANT_PORT
         )
         self.minio_client = Minio(
-            settings.MINIO_ENDPOINT,        # ← lowercase!
-            access_key=settings.MINIO_ACCESS_KEY,     # ← lowercase!
-            secret_key=settings.MINIO_SECRET_KEY,     # ← lowercase!
-            secure=settings.MINIO_SECURE    # ← lowercase!
+            settings.MINIO_ENDPOINT,
+            access_key=settings.MINIO_ACCESS_KEY,
+            secret_key=settings.MINIO_SECRET_KEY,
+            secure=settings.MINIO_SECURE
         )
-        self.tokenizer = tiktoken.encoding_for_model(settings.OPENAI_MODEL)  # ← lowercase!
+        self.tokenizer = tiktoken.encoding_for_model(settings.OPENAI_MODEL)
         
     async def initialize_collections(self):
         """Initialize Qdrant collections"""
         collections = {
             "documents": {
                 "size": 3072,  # text-embedding-3-large dimension
-                "distance": Distance.COSINE
-            },
-            "images": {
-                "size": 1536,  # vision embedding dimension
                 "distance": Distance.COSINE
             }
         }
@@ -84,219 +82,337 @@ class DocumentProcessor:
             "chunks_created": len(chunks),
             "status": "success"
         }
+    
     async def process_pdf(self, file_path: str) -> Dict[str, Any]:
-        """Extract text and images from PDF"""
+        """
+        NEW APPROACH: Analyze full page snapshots instead of extracting individual images
+        This captures ALL visuals including tables, graphs, and layout-based diagrams
+        """
+        print(f"\n{'='*80}")
+        print(f"📄 PROCESSING PDF WITH PAGE SNAPSHOT ANALYSIS")
+        print(f"{'='*80}")
         print(f"Opening PDF: {file_path}")
+        
         pdf_document = fitz.open(file_path)
-        print(f"PDF has {len(pdf_document)} pages")
+        print(f"✅ PDF loaded: {len(pdf_document)} pages")
         
         content = {
-            "text": [],
-            "images": [],
-            "diagrams": [],
-            "tables": []
+            "pages": []  # Store page-by-page analysis
         }
         
         for page_num, page in enumerate(pdf_document, 1):
-            print(f"Processing page {page_num}/{len(pdf_document)}...")
+            print(f"\n{'─'*80}")
+            print(f"📖 Processing Page {page_num}/{len(pdf_document)}")
+            print(f"{'─'*80}")
             
-            # Extract text
+            page_content = {
+                "page_number": page_num,
+                "text": None,
+                "visual_analysis": None,
+                "has_visuals": False
+            }
+            
+            # Step 1: Extract text content
+            print(f"  📝 Extracting text...")
             text = page.get_text()
+            text_length = len(text.strip())
+            
             if text.strip():
-                print(f"  - Extracted {len(text)} characters of text")
-                content["text"].append({
-                    "page": page_num,
-                    "content": text,
-                    "type": "text"
-                })
+                page_content["text"] = text
+                print(f"     ✅ Extracted {text_length} characters")
+                print(f"     Preview: {text.strip()[:100]}...")
+            else:
+                print(f"     ⚠️  No text found on this page")
             
-            # Extract images
-            image_list = page.get_images()
-            print(f"  - Found {len(image_list)} images")
-
-            for img_index, img in enumerate(image_list):
-                print(f"    - Processing image {img_index + 1}/{len(image_list)}...")
-                try:
-                    xref = img[0]
-                    pix = fitz.Pixmap(pdf_document, xref)
-                    
-                    if pix.n - pix.alpha < 4:  # GRAY or RGB
-                        print(f"      → Valid image format (colorspace: {pix.n})")
-                        # Analyze image with GPT-4 Vision
-                        image_analysis = await self.analyze_image_with_vision(pix.tobytes())
-                        print(f"      → Analysis type: {image_analysis['type']}")
-                        
-                        content["images"].append({
-                            "page": page_num,
-                            "index": img_index,
-                            "analysis": image_analysis,
-                            "type": "image"
-                        })
-                        print(f"      → ✅ Image added to content")
-                    else:
-                        print(f"      → Skipping (unsupported colorspace: {pix.n})")
-                    
-                    pix = None
-                    
-                except Exception as e:
-                    print(f"      → ❌ Error processing image: {str(e)}")
-                    continue
+            # Step 2: Create page snapshot and analyze with Vision API
+            print(f"  📸 Creating page snapshot...")
+            try:
+                # Convert page to high-resolution image
+                # zoom=2 means 2x resolution (144 DPI instead of 72 DPI)
+                mat = fitz.Matrix(2, 2)
+                pix = page.get_pixmap(matrix=mat)
+                
+                print(f"     ✅ Snapshot created: {pix.width}x{pix.height} pixels")
+                
+                # Convert to bytes
+                img_bytes = pix.tobytes("png")
+                print(f"     Size: {len(img_bytes)/1024:.2f} KB")
+                
+                # Analyze the entire page with Vision API
+                print(f"  🔍 Analyzing page with GPT-4 Vision...")
+                visual_analysis = await self.analyze_page_snapshot(
+                    img_bytes, 
+                    page_num,
+                    has_text=(text_length > 0)
+                )
+                
+                if visual_analysis and visual_analysis.get("has_visuals"):
+                    page_content["visual_analysis"] = visual_analysis
+                    page_content["has_visuals"] = True
+                    print(f"     ✅ VISUALS DETECTED!")
+                    print(f"     Types found: {', '.join(visual_analysis.get('visual_types', []))}")
+                    print(f"     Description: {visual_analysis['description'][:150]}...")
+                else:
+                    print(f"     ℹ️  No significant visuals detected")
+                
+                pix = None
+                
+            except Exception as e:
+                print(f"     ❌ Error analyzing page snapshot: {str(e)}")
+                import traceback
+                traceback.print_exc()
+            
+            # Add page to content
+            content["pages"].append(page_content)
         
-        # CRITICAL: Return the content!
-        print("PDF processing complete!")
         pdf_document.close()
-        return content  # ← ADD THIS LINE!
-    
-    async def analyze_image_with_vision(self, image_bytes: bytes) -> Dict[str, Any]:
-        """Analyze image using GPT-4 Vision"""
-        import base64
         
+        # Print summary
+        print(f"\n{'='*80}")
+        print(f"✅ PDF PROCESSING COMPLETE")
+        print(f"{'='*80}")
+        print(f"Total pages: {len(content['pages'])}")
+        print(f"Pages with text: {sum(1 for p in content['pages'] if p['text'])}")
+        print(f"Pages with visuals: {sum(1 for p in content['pages'] if p['has_visuals'])}")
+        print(f"{'='*80}\n")
+        
+        return content
+    
+    async def analyze_page_snapshot(
+        self, 
+        image_bytes: bytes, 
+        page_num: int,
+        has_text: bool
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Analyze a full page snapshot to detect and describe visuals
+        
+        Returns:
+            {
+                "has_visuals": True/False,
+                "visual_types": ["diagram", "table", "chart"],
+                "description": "Detailed description...",
+                "key_elements": ["element1", "element2"]
+            }
+        """
         try:
-            print(f"      → Encoding image (size: {len(image_bytes)} bytes)...")
+            # Convert to base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            print(f"      → Base64 size: {len(base64_image)} chars")
             
-            print(f"      → Calling GPT-4o Vision API...")
+            # Create specialized prompt for page analysis
+            analysis_prompt = """Analyze this document page carefully and determine:
+
+1. **Does this page contain ANY visual elements?** (diagrams, charts, graphs, tables, flowcharts, network diagrams, architecture diagrams, screenshots, illustrations, etc.)
+
+2. **If YES, provide:**
+   - List of visual types present (e.g., "network diagram", "table", "flowchart")
+   - Detailed description of each visual element
+   - Any text, labels, or annotations visible in the visuals
+   - Relationships or connections shown in diagrams
+   - Data or information presented in tables/charts
+   - Technical specifications or model numbers visible
+
+3. **If NO visuals**, simply respond: "NO_VISUALS_FOUND"
+
+**Important:** 
+- Look for ALL types of visuals, including tables, diagrams, charts, graphs, screenshots
+- Even simple diagrams or small icons count as visuals
+- Technical diagrams often have text labels - include those in your description
+- If you see hardware specifications, network topologies, or system architectures, describe them in detail
+
+Respond in this format:
+HAS_VISUALS: [YES/NO]
+VISUAL_TYPES: [list types if YES]
+DESCRIPTION: [detailed description if YES]
+KEY_ELEMENTS: [important elements, model numbers, labels if YES]"""
+            
+            # Call Vision API
             response = await self.openai_client.chat.completions.create(
                 model=settings.OPENAI_VISION_MODEL,
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are analyzing technical diagrams and images from documents. Describe what you see, identify any diagrams, flowcharts, network diagrams, or technical illustrations. Extract all text and relationships visible."
+                        "content": "You are an expert at analyzing technical documents and identifying visual elements like diagrams, charts, tables, and illustrations."
                     },
                     {
                         "role": "user",
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Analyze this image and describe its contents, especially if it's a technical diagram."
+                                "text": analysis_prompt
                             },
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                    "url": f"data:image/png;base64,{base64_image}"
                                 }
                             }
                         ]
                     }
                 ],
-                max_tokens=500
+                max_tokens=800
             )
             
-            description = response.choices[0].message.content
-            print(f"      → ✅ Got vision response: {description[:100]}...")
+            response_text = response.choices[0].message.content
+            
+            # Parse response
+            if "NO_VISUALS_FOUND" in response_text or "HAS_VISUALS: NO" in response_text:
+                return {
+                    "has_visuals": False,
+                    "description": "This page contains only text content with no visual elements."
+                }
+            
+            # Extract information from structured response
+            visual_types = []
+            description = ""
+            key_elements = []
+            
+            # Parse VISUAL_TYPES
+            if "VISUAL_TYPES:" in response_text:
+                types_line = response_text.split("VISUAL_TYPES:")[1].split("\n")[0]
+                visual_types = [t.strip() for t in types_line.replace("[", "").replace("]", "").split(",") if t.strip()]
+            
+            # Parse DESCRIPTION
+            if "DESCRIPTION:" in response_text:
+                desc_start = response_text.find("DESCRIPTION:") + len("DESCRIPTION:")
+                desc_end = response_text.find("KEY_ELEMENTS:") if "KEY_ELEMENTS:" in response_text else len(response_text)
+                description = response_text[desc_start:desc_end].strip()
+            
+            # Parse KEY_ELEMENTS
+            if "KEY_ELEMENTS:" in response_text:
+                elements_line = response_text.split("KEY_ELEMENTS:")[1].strip()
+                key_elements = [e.strip() for e in elements_line.replace("[", "").replace("]", "").split(",") if e.strip()]
+            
+            # Fallback: if structured parsing fails, use the whole response
+            if not description:
+                description = response_text
+            
+            # Classify visual types if not provided
+            if not visual_types:
+                visual_types = self._classify_visual_types(description)
             
             return {
+                "has_visuals": True,
+                "visual_types": visual_types,
                 "description": description,
-                "type": self.classify_image_type(description)
+                "key_elements": key_elements,
+                "raw_response": response_text
             }
             
         except Exception as e:
-            print(f"      → ❌ ERROR in vision analysis: {str(e)}")
-            # Return a fallback instead of failing
-            return {
-                "description": f"[Image could not be analyzed: {str(e)}]",
-                "type": "general_image"
-            }
+            print(f"     ❌ ERROR in page snapshot analysis: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
     
-    def classify_image_type(self, description: str) -> str:
-        """Classify image type based on description"""
+    def _classify_visual_types(self, description: str) -> List[str]:
+        """Classify visual types based on description"""
         description_lower = description.lower()
-        if any(term in description_lower for term in ["flowchart", "flow diagram", "process flow"]):
-            return "flowchart"
-        elif any(term in description_lower for term in ["network", "architecture", "system diagram"]):
-            return "architecture_diagram"
-        elif any(term in description_lower for term in ["table", "grid", "matrix"]):
-            return "table"
-        elif any(term in description_lower for term in ["chart", "graph", "plot"]):
-            return "chart"
-        else:
-            return "general_image"
+        types = []
+        
+        type_keywords = {
+            "network_diagram": ["network", "topology", "router", "switch", "cisco"],
+            "flowchart": ["flowchart", "flow diagram", "process flow", "workflow"],
+            "architecture_diagram": ["architecture", "system diagram", "infrastructure", "design"],
+            "table": ["table", "grid", "matrix", "spreadsheet"],
+            "chart": ["chart", "graph", "plot", "bar chart", "pie chart"],
+            "graph": ["graph", "line graph", "scatter plot"],
+            "screenshot": ["screenshot", "screen capture", "interface"],
+            "technical_diagram": ["technical diagram", "schematic", "blueprint"],
+            "illustration": ["illustration", "drawing", "figure"]
+        }
+        
+        for visual_type, keywords in type_keywords.items():
+            if any(keyword in description_lower for keyword in keywords):
+                types.append(visual_type)
+        
+        if not types:
+            types.append("general_visual")
+        
+        return types
     
     async def create_smart_chunks(self, content: Dict[str, Any], document_id: str) -> List[Dict]:
-        """Create intelligent chunks with context preservation"""
-        print(f"\n=== Creating Smart Chunks ===")
+        """Create intelligent chunks from page content"""
+        print(f"\n{'='*80}")
+        print(f"🔪 CREATING SMART CHUNKS")
+        print(f"{'='*80}")
+        
         chunks = []
         chunk_id = 0
         
-        # Process text chunks
-        text_items = content.get("text", [])
-        print(f"Processing {len(text_items)} text items...")
-        
-        for text_item in text_items:
-            page = text_item["page"]
-            text_content = text_item["content"]
+        # Process each page
+        for page_data in content.get("pages", []):
+            page_num = page_data["page_number"]
+            print(f"\n📄 Processing Page {page_num}")
             
-            print(f"  → Processing page {page}...")
+            # Process text content
+            if page_data.get("text"):
+                text_content = page_data["text"]
+                
+                # Check if hardware section
+                if self._is_hardware_section(text_content):
+                    print(f"   ⚡ HARDWARE SECTION - keeping together")
+                    chunk = {
+                        "chunk_id": str(uuid.uuid4()),
+                        "document_id": document_id,
+                        "content": text_content,
+                        "type": "hardware_spec",
+                        "page": page_num,
+                        "metadata": {
+                            "token_count": len(self.tokenizer.encode(text_content)),
+                            "section_type": "hardware",
+                            "contains_specs": True,
+                            "model_numbers": self._extract_model_numbers(text_content)
+                        }
+                    }
+                    chunks.append(chunk)
+                    print(f"   ✅ Hardware chunk created with {len(chunk['metadata']['model_numbers'])} models")
+                else:
+                    # Regular text chunking
+                    text_chunks = self.chunk_text(text_content, page_num, chunk_id, document_id)
+                    chunks.extend(text_chunks)
+                    print(f"   ✅ Created {len(text_chunks)} text chunks")
+                    chunk_id += len(text_chunks)
             
-            # ENHANCED: Check if this is a hardware specification section
-            if self._is_hardware_section(text_content):
-                print(f"    ⚡ HARDWARE SECTION DETECTED - keeping together")
-                # Keep hardware sections together without splitting
+            # Process visual analysis
+            if page_data.get("has_visuals") and page_data.get("visual_analysis"):
+                visual_analysis = page_data["visual_analysis"]
+                
+                print(f"   🖼️  VISUAL CONTENT DETECTED")
+                print(f"      Types: {', '.join(visual_analysis.get('visual_types', []))}")
+                
+                # Create chunk for visual content
                 chunk = {
                     "chunk_id": str(uuid.uuid4()),
                     "document_id": document_id,
-                    "content": text_content,
-                    "type": "hardware_spec",  # Special type for hardware specs
-                    "page": page,
+                    "content": visual_analysis["description"],
+                    "type": "visual",
+                    "page": page_num,
                     "metadata": {
-                        "token_count": len(self.tokenizer.encode(text_content)),
-                        "section_type": "hardware",
-                        "contains_specs": True,
-                        "model_numbers": self._extract_model_numbers(text_content)
+                        "visual_types": visual_analysis.get("visual_types", []),
+                        "key_elements": visual_analysis.get("key_elements", []),
+                        "has_text_on_page": bool(page_data.get("text"))
                     }
                 }
                 chunks.append(chunk)
-                print(f"    ✅ Created hardware spec chunk with models: {chunk['metadata']['model_numbers']}")
+                print(f"   ✅ Visual chunk created")
                 chunk_id += 1
-            else:
-                # Use standard chunking for other text
-                text_chunks = self.chunk_text(
-                    text_content,
-                    page,
-                    chunk_id,
-                    document_id
-                )
-                print(f"    ✅ Created {len(text_chunks)} standard text chunks from page {page}")
-                chunks.extend(text_chunks)
-                chunk_id += len(text_chunks)
         
-        print(f"\nText chunks total: {len(chunks)}")
-        
-        # Process image descriptions
-        print(f"\n--- Processing Image Chunks ---")
-        image_items = content.get("images", [])
-        print(f"Found {len(image_items)} images to process")
-        
-        for image_item in image_items:
-            print(f"  → Creating chunk for image on page {image_item['page']}...")
-            chunk = {
-                "chunk_id": str(uuid.uuid4()),
-                "document_id": document_id,
-                "content": image_item["analysis"]["description"],
-                "type": "image",
-                "page": image_item["page"],
-                "metadata": {
-                    "image_type": image_item["analysis"]["type"],
-                    "image_index": image_item["index"]
-                }
-            }
-            chunks.append(chunk)
-            print(f"    ✅ Image chunk created (content length: {len(image_item['analysis']['description'])} chars)")
-            chunk_id += 1
-        
-        print(f"\n✅ Total chunks created: {len(chunks)}")
-        print(f"   - Text chunks: {len([c for c in chunks if c['type'] == 'text'])}")
-        print(f"   - Hardware spec chunks: {len([c for c in chunks if c['type'] == 'hardware_spec'])}")
-        print(f"   - Image chunks: {len([c for c in chunks if c['type'] == 'image'])}")
+        print(f"\n{'='*80}")
+        print(f"✅ CHUNKING COMPLETE")
+        print(f"{'='*80}")
+        print(f"Total chunks: {len(chunks)}")
+        print(f"  - Text chunks: {len([c for c in chunks if c['type'] == 'text'])}")
+        print(f"  - Hardware spec chunks: {len([c for c in chunks if c['type'] == 'hardware_spec'])}")
+        print(f"  - Visual chunks: {len([c for c in chunks if c['type'] == 'visual'])}")
+        print(f"{'='*80}\n")
         
         return chunks
-
+    
     def _is_hardware_section(self, text: str) -> bool:
         """Detect if text is a hardware specification section"""
         text_lower = text.lower()
         
-        # Count hardware-related indicators
         indicators = {
             'hardware': 'hardware' in text_lower,
             'cisco': 'cisco' in text_lower,
@@ -312,22 +428,16 @@ class DocumentProcessor:
             'specification': 'specification' in text_lower or 'specs' in text_lower
         }
         
-        # If 4 or more indicators are present, it's likely a hardware section
         match_count = sum(indicators.values())
-        
-        if match_count >= 4:
-            print(f"    🎯 Hardware section detected ({match_count}/12 indicators)")
-            return True
-        
-        return False
-
+        return match_count >= 4
+    
     def _extract_model_numbers(self, text: str) -> List[str]:
         """Extract Cisco model numbers from text"""
         import re
         
         models = []
         
-        # Pattern 1: Catalyst followed by model number (e.g., "Catalyst 9407R", "Catalyst 9300-48P")
+        # Pattern 1: Catalyst followed by model number
         pattern1 = r'Catalyst\s+(\d{4}[A-Z]?(?:-\d+[A-Z]+)?)'
         matches1 = re.findall(pattern1, text, re.IGNORECASE)
         models.extend([f"Catalyst {m}" for m in matches1])
@@ -337,13 +447,12 @@ class DocumentProcessor:
         matches2 = re.findall(pattern2, text, re.IGNORECASE)
         models.extend([f"Cisco Catalyst {m}" for m in matches2])
         
-        # Pattern 3: Standalone model numbers (e.g., "9407R", "9300-48P")
+        # Pattern 3: Standalone model numbers
         pattern3 = r'\b(\d{4}[A-Z]?(?:-\d+[A-Z]+)?)\b'
         matches3 = re.findall(pattern3, text)
-        # Filter to likely Cisco models (4 digits starting with 9, 3, 2, or 1)
         models.extend([m for m in matches3 if m[0] in '9321' and len(m) >= 4])
         
-        # Remove duplicates while preserving order
+        # Remove duplicates
         unique_models = []
         seen = set()
         for model in models:
@@ -353,7 +462,7 @@ class DocumentProcessor:
                 seen.add(model_clean)
         
         return unique_models
-
+    
     def chunk_text(self, text: str, page: int, start_chunk_id: int, document_id: str) -> List[Dict]:
         """Chunk text with overlap"""
         tokens = self.tokenizer.encode(text)
@@ -379,10 +488,16 @@ class DocumentProcessor:
     
     async def embed_and_store(self, chunks: List[Dict], document_name: str, document_id: str):
         """Generate embeddings and store in Qdrant"""
+        print(f"\n{'='*80}")
+        print(f"🔢 GENERATING EMBEDDINGS AND STORING")
+        print(f"{'='*80}")
+        
         # Batch process embeddings
         for i in range(0, len(chunks), settings.EMBEDDING_BATCH_SIZE):
             batch = chunks[i:i + settings.EMBEDDING_BATCH_SIZE]
             texts = [chunk["content"] for chunk in batch]
+            
+            print(f"Processing batch {i//settings.EMBEDDING_BATCH_SIZE + 1}/{(len(chunks)-1)//settings.EMBEDDING_BATCH_SIZE + 1}")
             
             # Generate embeddings
             response = await self.openai_client.embeddings.create(
@@ -415,6 +530,10 @@ class DocumentProcessor:
                 collection_name="documents",
                 points=points
             )
+            
+            print(f"   ✅ Stored {len(points)} vectors in Qdrant")
+        
+        print(f"{'='*80}\n")
     
     def generate_document_id(self, file_path: str) -> str:
         """Generate unique document ID"""

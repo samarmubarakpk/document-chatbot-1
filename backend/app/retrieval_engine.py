@@ -1,4 +1,4 @@
-# retrieval_engine.py
+# retrieval_engine.py - Updated to handle new "visual" chunk type
 from typing import List, Dict, Any, Optional
 import numpy as np
 from openai import AsyncOpenAI
@@ -30,7 +30,7 @@ class HybridRetriever:
         top_k: int = 10,
         document_filter: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Advanced hybrid retrieval with reranking and page-aware boosting"""
+        """Advanced hybrid retrieval with page-level visual boosting"""
         
         # Check cache first
         cache_key = self._get_cache_key(query, top_k, document_filter)
@@ -76,7 +76,7 @@ class HybridRetriever:
         
         print(f"\n=== Retrieved {len(candidates)} initial candidates ===")
         
-        # GROUP BY PAGE - This is the KEY fix!
+        # GROUP BY PAGE - This is critical for context!
         page_groups = {}
         for candidate in candidates:
             doc_page_key = f"{candidate['document_name']}_{candidate['page']}"
@@ -89,27 +89,44 @@ class HybridRetriever:
         # BOOST: Combine scores for chunks from the same page
         page_scores = {}
         for doc_page_key, chunks in page_groups.items():
-            # Calculate combined score
-            text_chunks = [c for c in chunks if c['type'] == 'text']
-            image_chunks = [c for c in chunks if c['type'] == 'image']
+            # Separate by chunk type
+            text_chunks = [c for c in chunks if c['type'] in ['text', 'hardware_spec']]
+            visual_chunks = [c for c in chunks if c['type'] == 'visual']  # NEW: visual type
+            hardware_chunks = [c for c in chunks if c['type'] == 'hardware_spec']
             
-            # Average score of all chunks on this page
+            # Calculate combined score
             avg_score = sum(c['score'] for c in chunks) / len(chunks)
             
-            # BOOST if page has BOTH text AND images
-            page_diversity_boost = 0.15 if (text_chunks and image_chunks) else 0
+            # BOOST if page has BOTH text AND visuals (complementary information)
+            page_diversity_boost = 0.15 if (text_chunks and visual_chunks) else 0
             
             # BOOST if multiple chunks from same page (indicates relevance)
             multi_chunk_boost = min(len(chunks) * 0.05, 0.2)  # Max 20% boost
+            
+            # EXTRA BOOST for hardware specs (often critical information)
+            hardware_boost = 0.1 if hardware_chunks else 0
+            
+            # EXTRA BOOST if visual contains key technical elements
+            visual_boost = 0.0
+            if visual_chunks:
+                for vc in visual_chunks:
+                    key_elements = vc['metadata'].get('metadata', {}).get('key_elements', [])
+                    if key_elements:  # Has identified key elements
+                        visual_boost = 0.1
+                        break
             
             page_scores[doc_page_key] = {
                 'base_score': avg_score,
                 'diversity_boost': page_diversity_boost,
                 'multi_chunk_boost': multi_chunk_boost,
-                'final_score': avg_score + page_diversity_boost + multi_chunk_boost,
+                'hardware_boost': hardware_boost,
+                'visual_boost': visual_boost,
+                'final_score': avg_score + page_diversity_boost + multi_chunk_boost + hardware_boost + visual_boost,
                 'chunks': chunks,
                 'page': chunks[0]['page'],
-                'document': chunks[0]['document_name']
+                'document': chunks[0]['document_name'],
+                'has_visuals': len(visual_chunks) > 0,
+                'has_hardware': len(hardware_chunks) > 0
             }
         
         # Sort pages by score
@@ -122,19 +139,28 @@ class HybridRetriever:
         print(f"\n=== Top 5 Pages by Score ===")
         for i, (doc_page_key, page_data) in enumerate(sorted_pages[:5], 1):
             print(f"{i}. {page_data['document']} Page {page_data['page']}")
-            print(f"   Score: {page_data['final_score']:.4f} (base: {page_data['base_score']:.4f}, "
-                f"diversity: +{page_data['diversity_boost']:.4f}, multi: +{page_data['multi_chunk_boost']:.4f})")
+            print(f"   Score: {page_data['final_score']:.4f} (base: {page_data['base_score']:.4f})")
+            print(f"   Boosts: diversity +{page_data['diversity_boost']:.4f}, "
+                  f"multi +{page_data['multi_chunk_boost']:.4f}, "
+                  f"hardware +{page_data['hardware_boost']:.4f}, "
+                  f"visual +{page_data['visual_boost']:.4f}")
             print(f"   Chunks: {len(page_data['chunks'])} "
-                f"({len([c for c in page_data['chunks'] if c['type']=='text'])} text, "
-                f"{len([c for c in page_data['chunks'] if c['type']=='image'])} image)")
+                  f"({len([c for c in page_data['chunks'] if c['type'] in ['text', 'hardware_spec']])} text, "
+                  f"{len([c for c in page_data['chunks'] if c['type']=='visual'])} visual)")
+            print(f"   Has visuals: {'✅' if page_data['has_visuals'] else '❌'}")
+            print(f"   Has hardware specs: {'✅' if page_data['has_hardware'] else '❌'}")
         
         # Flatten back to chunks, but in page-grouped order
         reordered_candidates = []
         for doc_page_key, page_data in sorted_pages:
-            # Sort chunks within page: text chunks first (they have specific details)
+            # Sort chunks within page
+            # Priority: hardware_spec > text > visual
             page_chunks = sorted(
                 page_data['chunks'], 
-                key=lambda x: (x['type'] != 'text', -x['score'])  # Text first, then by score
+                key=lambda x: (
+                    0 if x['type'] == 'hardware_spec' else (1 if x['type'] == 'text' else 2),
+                    -x['score']
+                )
             )
             reordered_candidates.extend(page_chunks)
         
@@ -167,9 +193,12 @@ class HybridRetriever:
         
         print(f"\n=== Final Top {len(final_candidates)} Results ===")
         for i, candidate in enumerate(final_candidates, 1):
-            print(f"{i}. [{candidate['type']}] Page {candidate['page']} - "
-                f"Score: {candidate['final_score']:.4f} - "
-                f"{candidate['text'][:80]}...")
+            chunk_type = candidate['type']
+            type_emoji = "📝" if chunk_type == "text" else ("🔧" if chunk_type == "hardware_spec" else "🖼️")
+            
+            print(f"{i}. {type_emoji} [{chunk_type}] Page {candidate['page']} - "
+                  f"Score: {candidate['final_score']:.4f}")
+            print(f"   {candidate['text'][:100]}...")
         
         # Cache results
         self.redis_client.setex(

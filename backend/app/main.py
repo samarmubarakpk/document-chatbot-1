@@ -1,4 +1,4 @@
-# main.py - FastAPI Application
+# main.py - Updated to handle new "visual" chunk type
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
@@ -17,7 +17,6 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 app = FastAPI(title="Intelligent Document Chatbot API")
-
 
 # CORS configuration
 app.add_middleware(
@@ -66,7 +65,7 @@ async def upload_document(file: UploadFile = File(...)):
             tmp.write(content)
             tmp_path = tmp.name
         
-        print(f"Processing file: {file.filename} at {tmp_path}")
+        logger.info(f"Processing file: {file.filename} at {tmp_path}")
         
         # Process document
         result = await document_processor.process_document(
@@ -77,7 +76,7 @@ async def upload_document(file: UploadFile = File(...)):
         return DocumentResponse(**result)
     
     except Exception as e:
-        print(f"Error processing document: {str(e)}")
+        logger.error(f"Error processing document: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -107,11 +106,8 @@ async def query_documents(request: QueryRequest):
         
         logger.info(f"\nRetrieved {len(results)} results")
         
-        # Build context
-        context = "\n\n".join([r["text"] for r in results])
-        
         # Generate response using GPT-4
-        response = await generate_answer(request.query, context, results)
+        response = await generate_answer(request.query, results)
         
         logger.info(f"\nGenerated answer ({len(response['answer'])} chars)")
         logger.info(f"Confidence: {response['confidence']:.2%}")
@@ -127,56 +123,58 @@ async def query_documents(request: QueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
     
     
-async def generate_answer(query: str, context: str, sources: List[Dict]) -> Dict:
-    """Generate answer using GPT-4 with explicit text+image fusion"""
+async def generate_answer(query: str, sources: List[Dict]) -> Dict:
+    """
+    Generate answer using GPT-4 with page-aware visual context
+    Updated to handle new "visual" chunk type
+    """
     openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     
-    # Separate text and image sources
-    text_sources = [s for s in sources if s['metadata'].get('type') in ['text', 'hardware_spec']]
-    image_sources = [s for s in sources if s['metadata'].get('type') == 'image']
-    hardware_sources = [s for s in sources if s['metadata'].get('section_type') == 'hardware']
+    # Separate sources by type
+    text_sources = [s for s in sources if s['metadata'].get('type') in ['text']]
+    hardware_sources = [s for s in sources if s['metadata'].get('type') == 'hardware_spec']
+    visual_sources = [s for s in sources if s['metadata'].get('type') == 'visual']
     
-    # Extract ALL model numbers from sources
+    # Extract ALL model numbers from hardware sources
     all_model_numbers = []
-    for source in sources:
-        models = source['metadata'].get('model_numbers', [])
+    for source in hardware_sources:
+        models = source['metadata'].get('metadata', {}).get('model_numbers', [])
         all_model_numbers.extend(models)
     
     # Remove duplicates
     all_model_numbers = list(set(all_model_numbers))
     
-    # Build enhanced context
+    # Build enhanced context organized by page
     enhanced_context = "=== DOCUMENT CONTENT ===\n\n"
     
-    # CRITICAL: Show model numbers upfront if they exist
+    # Show model numbers upfront if they exist
     if all_model_numbers:
         enhanced_context += "⚠️ IMPORTANT - MODEL NUMBERS FOUND IN DOCUMENT:\n"
         for model in all_model_numbers:
             enhanced_context += f"  • {model}\n"
         enhanced_context += "\n"
     
-    # Group by page for better context
+    # Group sources by page for better context
     page_content = {}
     for source in sources[:10]:  # Top 10 sources
         page = source['metadata'].get('page', 0)
         doc_name = source['metadata'].get('document_name', 'Unknown')
         source_type = source['metadata'].get('type', 'text')
-        is_hardware = source['metadata'].get('section_type') == 'hardware'
         
         page_key = f"{doc_name}_Page{page}"
         if page_key not in page_content:
             page_content[page_key] = {
                 'text': [],
                 'hardware': [],
-                'images': []
+                'visuals': []
             }
         
-        if is_hardware or source_type == 'hardware_spec':
-            page_content[page_key]['hardware'].append(source['text'])
-        elif source_type == 'text':
-            page_content[page_key]['text'].append(source['text'])
+        if source_type == 'hardware_spec':
+            page_content[page_key]['hardware'].append(source)
+        elif source_type == 'visual':
+            page_content[page_key]['visuals'].append(source)
         else:
-            page_content[page_key]['images'].append(source['text'])
+            page_content[page_key]['text'].append(source)
     
     # Build context with clear separation
     for page_key, content in page_content.items():
@@ -185,20 +183,26 @@ async def generate_answer(query: str, context: str, sources: List[Dict]) -> Dict
         # HARDWARE SPECS FIRST (highest priority)
         if content['hardware']:
             enhanced_context += "\n**🔧 HARDWARE SPECIFICATIONS:**\n"
-            for hw_text in content['hardware']:
-                enhanced_context += f"{hw_text}\n\n"
+            for hw_source in content['hardware']:
+                enhanced_context += f"{hw_source['text']}\n\n"
         
-        # Then text content
+        # Then regular text content
         if content['text']:
             enhanced_context += "\n**📄 Text Content:**\n"
-            for text in content['text']:
-                enhanced_context += f"{text}\n\n"
+            for text_source in content['text']:
+                enhanced_context += f"{text_source['text']}\n\n"
         
-        # Images last
-        if content['images']:
-            enhanced_context += "\n**🖼️ Images/Diagrams on this page:**\n"
-            for img_desc in content['images']:
-                enhanced_context += f"- {img_desc}\n"
+        # Visual content - with metadata
+        if content['visuals']:
+            enhanced_context += "\n**🖼️ Visual Elements on this page:**\n"
+            for visual_source in content['visuals']:
+                visual_types = visual_source['metadata'].get('metadata', {}).get('visual_types', [])
+                key_elements = visual_source['metadata'].get('metadata', {}).get('key_elements', [])
+                
+                enhanced_context += f"\n📊 Visual Type(s): {', '.join(visual_types)}\n"
+                if key_elements:
+                    enhanced_context += f"🔑 Key Elements: {', '.join(key_elements)}\n"
+                enhanced_context += f"Description: {visual_source['text']}\n\n"
         
         enhanced_context += "\n" + "-"*80 + "\n"
     
@@ -207,12 +211,14 @@ async def generate_answer(query: str, context: str, sources: List[Dict]) -> Dict
 
 ⚠️ CRITICAL INSTRUCTIONS - READ CAREFULLY:
 
-1. The context below contains REAL information extracted from the document
+1. The context below contains REAL information extracted from the document (both text and visual analysis)
 2. If model numbers, specifications, or technical details appear in the context, YOU MUST use them
 3. NEVER say information is "not provided" if it EXISTS in the context
 4. When hardware specifications are marked with 🔧, they contain exact technical details
-5. Prioritize hardware specifications over image descriptions
-6. Always cite the specific page where you found information
+5. When visual elements are marked with 🖼️, they describe diagrams, charts, or tables from the document
+6. Visual descriptions often contain critical information like network topology, connections, or data relationships
+7. Always cite the specific page where you found information
+8. Combine information from text, hardware specs, and visual descriptions to give complete answers
 
 QUESTION: {query}
 
@@ -222,9 +228,10 @@ CONTEXT FROM DOCUMENT:
 YOUR TASK:
 - Answer the question using ONLY the information in the context above
 - If model numbers or specifications are shown in the context, include them in your answer
-- If images describe hardware, cross-reference with hardware specifications from the same page
+- If visual descriptions provide relevant information (diagrams, charts, tables), incorporate that into your answer
 - Be specific and technical - use exact model numbers and specifications
-- Cite page numbers
+- Cite page numbers for your sources
+- If information comes from a visual element, mention that (e.g., "as shown in the network diagram on page 4")
 
 Answer:"""
     
@@ -233,7 +240,7 @@ Answer:"""
         messages=[
             {
                 "role": "system", 
-                "content": "You are a precise technical expert. When analyzing context, you extract and use ALL available technical specifications. You NEVER claim information is missing if it exists in the provided context. You prioritize explicit specifications over generic descriptions."
+                "content": "You are a precise technical expert. When analyzing context, you extract and use ALL available information from text, specifications, and visual descriptions. You NEVER claim information is missing if it exists in the provided context. You synthesize information from multiple sources (text + visuals) to provide complete answers."
             },
             {
                 "role": "user", 
@@ -251,15 +258,25 @@ Answer:"""
     for source in sources[:5]:  # Top 5 sources
         page = source['metadata'].get('page', 0)
         doc_name = source['metadata'].get('document_name', 'Unknown')
+        source_type = source['metadata'].get('type', 'text')
         page_key = f"{doc_name}_Page{page}"
         
         if page_key not in seen_pages:
             seen_pages.add(page_key)
+            
+            # Add visual types if it's a visual source
+            extra_info = {}
+            if source_type == 'visual':
+                visual_types = source['metadata'].get('metadata', {}).get('visual_types', [])
+                if visual_types:
+                    extra_info['visual_types'] = visual_types
+            
             source_info.append({
                 "document": doc_name,
                 "page": page,
-                "type": source['metadata'].get('type', 'text'),
-                "relevance_score": source.get("final_score", 0)
+                "type": source_type,
+                "relevance_score": source.get("final_score", 0),
+                **extra_info
             })
     
     return {
