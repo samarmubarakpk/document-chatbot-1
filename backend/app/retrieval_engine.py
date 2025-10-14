@@ -1,9 +1,9 @@
-# retrieval_engine.py - Updated to handle new "visual" chunk type
+# retrieval_engine.py - Enhanced for multi-document handling
 from typing import List, Dict, Any, Optional
 import numpy as np
 from openai import AsyncOpenAI
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Filter, FieldCondition, Range, SearchParams
+from qdrant_client.models import Filter, FieldCondition, SearchParams
 from sentence_transformers import CrossEncoder
 import redis
 import json
@@ -30,18 +30,18 @@ class HybridRetriever:
         top_k: int = 10,
         document_filter: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Advanced hybrid retrieval with page-level visual boosting"""
+        """Enhanced retrieval with multi-document handling"""
         
-        # Check cache first
+        # Check cache
         cache_key = self._get_cache_key(query, top_k, document_filter)
         cached_result = self.redis_client.get(cache_key)
         if cached_result:
             return json.loads(cached_result)
         
-        # Generate query embedding
+        # Generate embedding
         query_embedding = await self._get_embedding(query)
         
-        # Build filter if document IDs provided
+        # Build filter
         search_filter = None
         if document_filter:
             search_filter = Filter(
@@ -53,11 +53,11 @@ class HybridRetriever:
                 ]
             )
         
-        # Dense retrieval - get MORE results for better reranking
+        # Dense retrieval
         search_results = await self.qdrant_client.search(
             collection_name="documents",
             query_vector=query_embedding,
-            limit=top_k * 5,  # Get 5x more for better page grouping
+            limit=top_k * 5,
             query_filter=search_filter
         )
         
@@ -71,92 +71,91 @@ class HybridRetriever:
                 "metadata": result.payload,
                 "page": result.payload.get("page", 0),
                 "type": result.payload.get("type", "text"),
-                "document_name": result.payload.get("document_name", "")
+                "document_name": result.payload.get("document_name", ""),
+                "document_id": result.payload.get("document_id", "")
             })
         
-        print(f"\n=== Retrieved {len(candidates)} initial candidates ===")
+        unique_docs = len(set(c['document_name'] for c in candidates))
+        print(f"\n=== Retrieved {len(candidates)} candidates from {unique_docs} documents ===")
         
-        # GROUP BY PAGE - This is critical for context!
-        page_groups = {}
+        # GROUP BY DOCUMENT AND PAGE
+        doc_page_groups = {}
         for candidate in candidates:
-            doc_page_key = f"{candidate['document_name']}_{candidate['page']}"
-            if doc_page_key not in page_groups:
-                page_groups[doc_page_key] = []
-            page_groups[doc_page_key].append(candidate)
+            doc_id = candidate['document_id']
+            page = candidate['page']
+            doc_page_key = f"{doc_id}_Page{page}"
+            
+            if doc_page_key not in doc_page_groups:
+                doc_page_groups[doc_page_key] = {
+                    'document_id': doc_id,
+                    'document_name': candidate['document_name'],
+                    'page': page,
+                    'chunks': []
+                }
+            
+            doc_page_groups[doc_page_key]['chunks'].append(candidate)
         
-        print(f"Grouped into {len(page_groups)} page groups")
+        print(f"Grouped into {len(doc_page_groups)} document-page combinations")
         
-        # BOOST: Combine scores for chunks from the same page
+        # Calculate page scores with document diversity
         page_scores = {}
-        for doc_page_key, chunks in page_groups.items():
-            # Separate by chunk type
+        
+        for doc_page_key, page_data in doc_page_groups.items():
+            chunks = page_data['chunks']
+            
+            # Separate by type
             text_chunks = [c for c in chunks if c['type'] in ['text', 'hardware_spec']]
-            visual_chunks = [c for c in chunks if c['type'] == 'visual']  # NEW: visual type
+            visual_chunks = [c for c in chunks if c['type'] == 'visual']
             hardware_chunks = [c for c in chunks if c['type'] == 'hardware_spec']
             
-            # Calculate combined score
+            # Base score
             avg_score = sum(c['score'] for c in chunks) / len(chunks)
             
-            # BOOST if page has BOTH text AND visuals (complementary information)
-            page_diversity_boost = 0.15 if (text_chunks and visual_chunks) else 0
-            
-            # BOOST if multiple chunks from same page (indicates relevance)
-            multi_chunk_boost = min(len(chunks) * 0.05, 0.2)  # Max 20% boost
-            
-            # EXTRA BOOST for hardware specs (often critical information)
+            # Boosts
+            diversity_boost = 0.15 if (text_chunks and visual_chunks) else 0
+            multi_chunk_boost = min(len(chunks) * 0.05, 0.2)
             hardware_boost = 0.1 if hardware_chunks else 0
             
-            # EXTRA BOOST if visual contains key technical elements
             visual_boost = 0.0
             if visual_chunks:
                 for vc in visual_chunks:
-                    key_elements = vc['metadata'].get('metadata', {}).get('key_elements', [])
-                    if key_elements:  # Has identified key elements
+                    if vc['metadata'].get('metadata', {}).get('key_elements', []):
                         visual_boost = 0.1
                         break
             
+            final_score = avg_score + diversity_boost + multi_chunk_boost + hardware_boost + visual_boost
+            
             page_scores[doc_page_key] = {
                 'base_score': avg_score,
-                'diversity_boost': page_diversity_boost,
-                'multi_chunk_boost': multi_chunk_boost,
-                'hardware_boost': hardware_boost,
-                'visual_boost': visual_boost,
-                'final_score': avg_score + page_diversity_boost + multi_chunk_boost + hardware_boost + visual_boost,
+                'final_score': final_score,
                 'chunks': chunks,
-                'page': chunks[0]['page'],
-                'document': chunks[0]['document_name'],
-                'has_visuals': len(visual_chunks) > 0,
-                'has_hardware': len(hardware_chunks) > 0
+                'document_id': page_data['document_id'],
+                'document_name': page_data['document_name'],
+                'page': page_data['page']
             }
         
-        # Sort pages by score
+        # Sort pages
         sorted_pages = sorted(
-            page_scores.items(), 
-            key=lambda x: x[1]['final_score'], 
+            page_scores.items(),
+            key=lambda x: x[1]['final_score'],
             reverse=True
         )
         
-        print(f"\n=== Top 5 Pages by Score ===")
-        for i, (doc_page_key, page_data) in enumerate(sorted_pages[:5], 1):
-            print(f"{i}. {page_data['document']} Page {page_data['page']}")
-            print(f"   Score: {page_data['final_score']:.4f} (base: {page_data['base_score']:.4f})")
-            print(f"   Boosts: diversity +{page_data['diversity_boost']:.4f}, "
-                  f"multi +{page_data['multi_chunk_boost']:.4f}, "
-                  f"hardware +{page_data['hardware_boost']:.4f}, "
-                  f"visual +{page_data['visual_boost']:.4f}")
-            print(f"   Chunks: {len(page_data['chunks'])} "
-                  f"({len([c for c in page_data['chunks'] if c['type'] in ['text', 'hardware_spec']])} text, "
-                  f"{len([c for c in page_data['chunks'] if c['type']=='visual'])} visual)")
-            print(f"   Has visuals: {'✅' if page_data['has_visuals'] else '❌'}")
-            print(f"   Has hardware specs: {'✅' if page_data['has_hardware'] else '❌'}")
+        # Print distribution
+        print(f"\n=== Document Distribution in Top Results ===")
+        doc_count = {}
+        for _, page_data in sorted_pages[:10]:
+            doc_name = page_data['document_name']
+            doc_count[doc_name] = doc_count.get(doc_name, 0) + 1
         
-        # Flatten back to chunks, but in page-grouped order
+        for doc_name, count in doc_count.items():
+            print(f"  📄 {doc_name}: {count} pages")
+        
+        # Flatten to chunks
         reordered_candidates = []
         for doc_page_key, page_data in sorted_pages:
-            # Sort chunks within page
-            # Priority: hardware_spec > text > visual
             page_chunks = sorted(
-                page_data['chunks'], 
+                page_data['chunks'],
                 key=lambda x: (
                     0 if x['type'] == 'hardware_spec' else (1 if x['type'] == 'text' else 2),
                     -x['score']
@@ -164,9 +163,8 @@ class HybridRetriever:
             )
             reordered_candidates.extend(page_chunks)
         
-        # Rerank with cross-encoder
+        # Rerank
         if reordered_candidates:
-            # Take top candidates for reranking
             candidates_to_rerank = reordered_candidates[:top_k * 3]
             texts = [c["text"] for c in candidates_to_rerank]
             
@@ -176,41 +174,52 @@ class HybridRetriever:
                 [(query, text) for text in texts]
             )
             
-            # Combine scores
             for i, candidate in enumerate(candidates_to_rerank):
                 candidate["rerank_score"] = float(rerank_scores[i])
-                # Weight: 30% original embedding score + 70% reranker score
                 candidate["final_score"] = (
                     0.3 * candidate["score"] + 
                     0.7 * candidate["rerank_score"]
                 )
             
-            # Final sort by combined score
             candidates_to_rerank.sort(key=lambda x: x["final_score"], reverse=True)
             final_candidates = candidates_to_rerank[:top_k]
         else:
             final_candidates = []
         
+        # Print final results
         print(f"\n=== Final Top {len(final_candidates)} Results ===")
+        current_doc = None
         for i, candidate in enumerate(final_candidates, 1):
-            chunk_type = candidate['type']
-            type_emoji = "📝" if chunk_type == "text" else ("🔧" if chunk_type == "hardware_spec" else "🖼️")
+            doc_name = candidate['document_name']
+            if doc_name != current_doc:
+                print(f"\n📄 {doc_name}")
+                current_doc = doc_name
             
-            print(f"{i}. {type_emoji} [{chunk_type}] Page {candidate['page']} - "
-                  f"Score: {candidate['final_score']:.4f}")
-            print(f"   {candidate['text'][:100]}...")
+            type_emoji = "📝" if candidate['type'] == "text" else ("🔧" if candidate['type'] == "hardware_spec" else "🖼️")
+            print(f"  {i}. {type_emoji} Page {candidate['page']} - Score: {candidate['final_score']:.4f}")
         
-        # Cache results
-        self.redis_client.setex(
-            cache_key,
-            3600,  # 1 hour TTL
-            json.dumps(final_candidates)
-        )
+        # Cache
+        self.redis_client.setex(cache_key, 3600, json.dumps(final_candidates))
         
         return final_candidates
     
+    async def delete_document(self, document_id: str):
+        """Delete all chunks for a document"""
+        await self.qdrant_client.delete(
+            collection_name="documents",
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="document_id",
+                        match={"value": document_id}
+                    )
+                ]
+            )
+        )
+        print(f"✅ Deleted all chunks for document {document_id}")
+    
     async def _get_embedding(self, text: str) -> List[float]:
-        """Generate embedding for text"""
+        """Generate embedding"""
         response = await self.openai_client.embeddings.create(
             model=settings.OPENAI_EMBEDDING_MODEL,
             input=text
@@ -218,7 +227,7 @@ class HybridRetriever:
         return response.data[0].embedding
     
     def _get_cache_key(self, query: str, top_k: int, document_filter: Optional[List[str]]) -> str:
-        """Generate cache key for query"""
+        """Generate cache key"""
         key_parts = [query, str(top_k)]
         if document_filter:
             key_parts.extend(sorted(document_filter))

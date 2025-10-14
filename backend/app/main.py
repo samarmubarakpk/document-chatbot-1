@@ -1,24 +1,28 @@
-# main.py - Updated to handle new "visual" chunk type
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+# main.py - Enhanced Multi-Document Support
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 from openai import AsyncOpenAI
-from pydantic import BaseModel
-from typing import Any, Dict, List, Optional
+from typing import List, Optional, Dict, Any
 import tempfile
 import os
+from datetime import datetime
+from collections import defaultdict
 
 from app.config import settings
 from app.document_processor import DocumentProcessor
 from app.retrieval_engine import HybridRetriever
+from app.models import (
+    QueryRequest, QueryResponse, DocumentResponse, 
+    SourceInfo, DocumentMetadata, DocumentListResponse
+)
 import logging
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-app = FastAPI(title="Intelligent Document Chatbot API")
 
-# CORS configuration
+app = FastAPI(title="Multi-Document Chatbot API")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,276 +31,243 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize services
 document_processor = DocumentProcessor()
 retriever = HybridRetriever()
 
-# Request/Response models
-class QueryRequest(BaseModel):
-    query: str
-    document_ids: Optional[List[str]] = None
-    top_k: int = 10
-
-class QueryResponse(BaseModel):
-    answer: str
-    sources: List[Dict[str, Any]]
-    confidence: float
-
-class DocumentResponse(BaseModel):
-    document_id: str
-    document_name: str
-    status: str
-    chunks_created: int
+# Document registry (use database in production)
+document_registry: Dict[str, Dict[str, Any]] = {}
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize collections on startup"""
     await document_processor.initialize_collections()
 
 @app.post("/upload", response_model=DocumentResponse)
-async def upload_document(file: UploadFile = File(...)):
-    """Upload and process a document"""
+async def upload_document(
+    file: UploadFile = File(...),
+    category: Optional[str] = None,
+    description: Optional[str] = None,
+    tags: Optional[str] = None
+):
+    """Upload and process a document with metadata"""
     tmp_path = None
     try:
-        # Save uploaded file temporarily
         suffix = os.path.splitext(file.filename)[1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             content = await file.read()
             tmp.write(content)
             tmp_path = tmp.name
         
-        logger.info(f"Processing file: {file.filename} at {tmp_path}")
+        logger.info(f"Processing file: {file.filename}")
+        result = await document_processor.process_document(tmp_path, file.filename)
         
-        # Process document
-        result = await document_processor.process_document(
-            tmp_path,
-            file.filename
+        # Store metadata
+        metadata = DocumentMetadata(
+            category=category,
+            description=description,
+            tags=tags.split(",") if tags else [],
+            upload_date=datetime.now(),
+            file_size=len(content),
+            page_count=result.get("page_count", 0)
         )
         
-        return DocumentResponse(**result)
+        document_registry[result["document_id"]] = {
+            "document_id": result["document_id"],
+            "document_name": file.filename,
+            "metadata": metadata.dict(),
+            "chunks_created": result["chunks_created"],
+            "upload_date": datetime.now().isoformat()
+        }
+        
+        return DocumentResponse(**result, metadata=metadata)
     
     except Exception as e:
-        logger.error(f"Error processing document: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     
     finally:
-        # Clean up
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
             except:
                 pass
 
+@app.get("/documents", response_model=DocumentListResponse)
+async def list_documents(
+    category: Optional[str] = None,
+    search: Optional[str] = None
+):
+    """List all documents with filtering"""
+    documents = list(document_registry.values())
+    
+    if category:
+        documents = [d for d in documents if d.get("metadata", {}).get("category") == category]
+    
+    if search:
+        search_lower = search.lower()
+        documents = [
+            d for d in documents 
+            if search_lower in d["document_name"].lower() or
+               search_lower in d.get("metadata", {}).get("description", "").lower()
+        ]
+    
+    return DocumentListResponse(documents=documents, total_count=len(documents))
+
+@app.delete("/documents/{document_id}")
+async def delete_document(document_id: str):
+    """Delete a document"""
+    if document_id not in document_registry:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    try:
+        await retriever.delete_document(document_id)
+        del document_registry[document_id]
+        return {"status": "success", "message": "Document deleted"}
+    except Exception as e:
+        logger.error(f"Error deleting: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
-    """Query the document knowledge base"""
+    """Query with multi-document support"""
     try:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"QUERY: {request.query}")
-        logger.info(f"{'='*60}")
+        logger.info(f"\nQUERY: {request.query}")
+        logger.info(f"MODE: {request.search_mode}")
         
-        # Retrieve relevant chunks
+        document_filter = None
+        if request.search_mode == "selected" and request.document_ids:
+            document_filter = request.document_ids
+            logger.info(f"Searching {len(document_filter)} documents")
+        
         results = await retriever.retrieve(
             request.query,
             request.top_k,
-            request.document_ids
+            document_filter
         )
         
-        logger.info(f"\nRetrieved {len(results)} results")
+        logger.info(f"Retrieved {len(results)} results")
+        response = await generate_multi_document_answer(request.query, results)
         
-        # Generate response using GPT-4
-        response = await generate_answer(request.query, results)
-        
-        logger.info(f"\nGenerated answer ({len(response['answer'])} chars)")
-        logger.info(f"Confidence: {response['confidence']:.2%}")
-        
-        return QueryResponse(
-            answer=response["answer"],
-            sources=response["sources"],
-            confidence=response["confidence"]
-        )
+        return QueryResponse(**response)
     
     except Exception as e:
-        logger.error(f"Error in query: {str(e)}", exc_info=True)
+        logger.error(f"Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-    
-    
-async def generate_answer(query: str, sources: List[Dict]) -> Dict:
-    """
-    Generate answer using GPT-4 with page-aware visual context
-    Updated to handle new "visual" chunk type
-    """
+
+
+async def generate_multi_document_answer(query: str, sources: List[Dict]) -> Dict:
+    """Generate answer with CLEAR document attribution"""
     openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     
-    # Separate sources by type
-    text_sources = [s for s in sources if s['metadata'].get('type') in ['text']]
-    hardware_sources = [s for s in sources if s['metadata'].get('type') == 'hardware_spec']
-    visual_sources = [s for s in sources if s['metadata'].get('type') == 'visual']
+    # Group by document
+    doc_groups = defaultdict(lambda: {'text': [], 'hardware': [], 'visuals': [], 'doc_name': ''})
     
-    # Extract ALL model numbers from hardware sources
-    all_model_numbers = []
-    for source in hardware_sources:
-        models = source['metadata'].get('metadata', {}).get('model_numbers', [])
-        all_model_numbers.extend(models)
-    
-    # Remove duplicates
-    all_model_numbers = list(set(all_model_numbers))
-    
-    # Build enhanced context organized by page
-    enhanced_context = "=== DOCUMENT CONTENT ===\n\n"
-    
-    # Show model numbers upfront if they exist
-    if all_model_numbers:
-        enhanced_context += "⚠️ IMPORTANT - MODEL NUMBERS FOUND IN DOCUMENT:\n"
-        for model in all_model_numbers:
-            enhanced_context += f"  • {model}\n"
-        enhanced_context += "\n"
-    
-    # Group sources by page for better context
-    page_content = {}
-    for source in sources[:10]:  # Top 10 sources
-        page = source['metadata'].get('page', 0)
+    for source in sources[:15]:
+        doc_id = source['metadata'].get('document_id', 'unknown')
         doc_name = source['metadata'].get('document_name', 'Unknown')
         source_type = source['metadata'].get('type', 'text')
+        page = source['metadata'].get('page', 0)
         
-        page_key = f"{doc_name}_Page{page}"
-        if page_key not in page_content:
-            page_content[page_key] = {
-                'text': [],
-                'hardware': [],
-                'visuals': []
-            }
+        doc_groups[doc_id]['doc_name'] = doc_name
+        source_with_page = {**source, 'page': page}
         
         if source_type == 'hardware_spec':
-            page_content[page_key]['hardware'].append(source)
+            doc_groups[doc_id]['hardware'].append(source_with_page)
         elif source_type == 'visual':
-            page_content[page_key]['visuals'].append(source)
+            doc_groups[doc_id]['visuals'].append(source_with_page)
         else:
-            page_content[page_key]['text'].append(source)
+            doc_groups[doc_id]['text'].append(source_with_page)
     
-    # Build context with clear separation
-    for page_key, content in page_content.items():
-        enhanced_context += f"\n## {page_key}\n"
+    # Build context with document separation
+    context = f"=== INFORMATION FROM {len(doc_groups)} DOCUMENT(S) ===\n\n"
+    context += "⚠️ IMPORTANT: Always specify which document information comes from.\n\n"
+    
+    documents_used = []
+    
+    for doc_idx, (doc_id, content) in enumerate(doc_groups.items(), 1):
+        doc_name = content['doc_name']
+        documents_used.append(doc_name)
         
-        # HARDWARE SPECS FIRST (highest priority)
+        context += f"\n{'='*80}\n📄 DOCUMENT {doc_idx}: {doc_name}\n{'='*80}\n\n"
+        
         if content['hardware']:
-            enhanced_context += "\n**🔧 HARDWARE SPECIFICATIONS:**\n"
-            for hw_source in content['hardware']:
-                enhanced_context += f"{hw_source['text']}\n\n"
+            context += "🔧 HARDWARE SPECIFICATIONS:\n"
+            for hw in content['hardware']:
+                context += f"[Page {hw['page']}] {hw['text']}\n\n"
         
-        # Then regular text content
         if content['text']:
-            enhanced_context += "\n**📄 Text Content:**\n"
-            for text_source in content['text']:
-                enhanced_context += f"{text_source['text']}\n\n"
+            context += "📄 TEXT CONTENT:\n"
+            for text in content['text'][:3]:  # Limit per doc
+                context += f"[Page {text['page']}] {text['text'][:500]}...\n\n"
         
-        # Visual content - with metadata
         if content['visuals']:
-            enhanced_context += "\n**🖼️ Visual Elements on this page:**\n"
-            for visual_source in content['visuals']:
-                visual_types = visual_source['metadata'].get('metadata', {}).get('visual_types', [])
-                key_elements = visual_source['metadata'].get('metadata', {}).get('key_elements', [])
-                
-                enhanced_context += f"\n📊 Visual Type(s): {', '.join(visual_types)}\n"
-                if key_elements:
-                    enhanced_context += f"🔑 Key Elements: {', '.join(key_elements)}\n"
-                enhanced_context += f"Description: {visual_source['text']}\n\n"
-        
-        enhanced_context += "\n" + "-"*80 + "\n"
+            context += "🖼️ VISUAL ELEMENTS:\n"
+            for visual in content['visuals']:
+                types = visual['metadata'].get('metadata', {}).get('visual_types', [])
+                context += f"[Page {visual['page']}] Types: {', '.join(types)}\n{visual['text']}\n\n"
     
-    # Build strict prompt
-    prompt = f"""You are a technical documentation expert analyzing network design documents.
+    prompt = f"""Analyze information from MULTIPLE documents.
 
-⚠️ CRITICAL INSTRUCTIONS - READ CAREFULLY:
-
-1. The context below contains REAL information extracted from the document (both text and visual analysis)
-2. If model numbers, specifications, or technical details appear in the context, YOU MUST use them
-3. NEVER say information is "not provided" if it EXISTS in the context
-4. When hardware specifications are marked with 🔧, they contain exact technical details
-5. When visual elements are marked with 🖼️, they describe diagrams, charts, or tables from the document
-6. Visual descriptions often contain critical information like network topology, connections, or data relationships
-7. Always cite the specific page where you found information
-8. Combine information from text, hardware specs, and visual descriptions to give complete answers
+CRITICAL RULES:
+1. ALWAYS specify which document each fact comes from: "According to [Document Name], ..."
+2. If multiple documents have info, note it: "Both [Doc A] and [Doc B] mention..."
+3. If documents conflict, acknowledge: "[Doc A] says X while [Doc B] says Y"
+4. Include page numbers for specific details
+5. Start by listing which documents you're referencing
 
 QUESTION: {query}
 
-CONTEXT FROM DOCUMENT:
-{enhanced_context}
+CONTEXT:
+{context}
 
-YOUR TASK:
-- Answer the question using ONLY the information in the context above
-- If model numbers or specifications are shown in the context, include them in your answer
-- If visual descriptions provide relevant information (diagrams, charts, tables), incorporate that into your answer
-- Be specific and technical - use exact model numbers and specifications
-- Cite page numbers for your sources
-- If information comes from a visual element, mention that (e.g., "as shown in the network diagram on page 4")
-
-Answer:"""
+YOUR ANSWER (with document attribution):"""
     
     response = await openai_client.chat.completions.create(
         model=settings.OPENAI_MODEL,
         messages=[
-            {
-                "role": "system", 
-                "content": "You are a precise technical expert. When analyzing context, you extract and use ALL available information from text, specifications, and visual descriptions. You NEVER claim information is missing if it exists in the provided context. You synthesize information from multiple sources (text + visuals) to provide complete answers."
-            },
-            {
-                "role": "user", 
-                "content": prompt
-            }
+            {"role": "system", "content": "You analyze multiple documents and ALWAYS clearly attribute information to specific documents. Never confuse sources."},
+            {"role": "user", "content": prompt}
         ],
-        temperature=0.0,  # Maximum factual accuracy
-        max_tokens=1500
+        temperature=0.0,
+        max_tokens=2000
     )
     
-    # Extract source information
+    # Build sources
     source_info = []
-    seen_pages = set()
+    seen = set()
     
-    for source in sources[:5]:  # Top 5 sources
-        page = source['metadata'].get('page', 0)
+    for source in sources[:10]:
         doc_name = source['metadata'].get('document_name', 'Unknown')
+        page = source['metadata'].get('page', 0)
         source_type = source['metadata'].get('type', 'text')
-        page_key = f"{doc_name}_Page{page}"
+        key = f"{doc_name}_{page}_{source_type}"
         
-        if page_key not in seen_pages:
-            seen_pages.add(page_key)
-            
-            # Add visual types if it's a visual source
-            extra_info = {}
-            if source_type == 'visual':
-                visual_types = source['metadata'].get('metadata', {}).get('visual_types', [])
-                if visual_types:
-                    extra_info['visual_types'] = visual_types
-            
-            source_info.append({
-                "document": doc_name,
-                "page": page,
-                "type": source_type,
-                "relevance_score": source.get("final_score", 0),
-                **extra_info
-            })
+        if key not in seen:
+            seen.add(key)
+            source_info.append(SourceInfo(
+                document_id=source['metadata'].get('document_id', ''),
+                document_name=doc_name,
+                page=page,
+                type=source_type,
+                relevance_score=float(source.get('final_score', 0)),
+                visual_types=source['metadata'].get('metadata', {}).get('visual_types') if source_type == 'visual' else None,
+                excerpt=source['text'][:200] + "..."
+            ))
     
-    # Calculate confidence safely (handle empty sources and NaN)
     scores = [s.get("final_score", 0) for s in sources[:5]]
     confidence = float(np.mean(scores)) if scores else 0.0
-    
-    # Sanitize NaN values
     if np.isnan(confidence):
         confidence = 0.0
     
     return {
         "answer": response.choices[0].message.content,
         "sources": source_info,
-        "confidence": confidence
+        "confidence": confidence,
+        "documents_used": documents_used
     }
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy"}
+    return {"status": "healthy", "documents": len(document_registry)}
 
 if __name__ == "__main__":
     import uvicorn
