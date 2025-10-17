@@ -18,6 +18,8 @@ from app.models import (
 )
 import logging
 
+from app.workflow_manager import WorkflowManager
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -125,6 +127,31 @@ async def delete_document(document_id: str):
     except Exception as e:
         logger.error(f"Error deleting: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/workflow/phase-one")
+async def execute_phase_one(file: UploadFile = File(...)):
+    """Execute Phase 1: Analysis and Understanding"""
+    workflow_mgr = WorkflowManager(document_processor)
+    # ... handle file and execute
+    
+@app.post("/workflow/phase-two")
+async def execute_phase_two(
+    workflow_ids: List[str],
+    output_type: str = "document"
+):
+    """Execute Phase 2: Generation"""
+    # ... generate document or image
+
+@app.post("/test/image-to-text-to-image")
+async def test_conversion(file: UploadFile = File(...)):
+    """Test bidirectional conversion"""
+    # ... test conversion
+
+@app.get("/workflow/diagram")
+async def get_workflow_diagram():
+    """Get workflow diagram"""
+    workflow_mgr = WorkflowManager(document_processor)
+    return {"diagram": workflow_mgr.generate_workflow_diagram()}
 
 @app.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):

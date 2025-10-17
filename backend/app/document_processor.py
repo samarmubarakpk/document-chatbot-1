@@ -8,9 +8,10 @@ from docx import Document
 from PIL import Image
 import cv2
 import numpy as np
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAI
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+import requests
 import tiktoken
 from minio import Minio
 import json
@@ -568,3 +569,160 @@ KEY_ELEMENTS: [important elements, model numbers, labels if YES]"""
             f"{document_id}/original",
             file_path
         )
+
+class EnhancedDocumentProcessor(DocumentProcessor):
+    def __init__(self):
+        super().__init__()
+        # Add text-to-image capability
+        self.openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    
+    async def extract_and_understand_image(self, image_bytes: bytes) -> Dict[str, Any]:
+        """
+        Step 1: Extract EVERYTHING from an image for reconstruction
+        """
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        
+        extraction_prompt = """You are analyzing a technical diagram/image for COMPLETE reconstruction.
+
+Extract in EXTREME DETAIL:
+1. **Layout Structure**: Describe exact positioning (top/left/right/center/bottom)
+2. **Every Component**: Shape, color, size, label, type (box/circle/cloud/cylinder)
+3. **All Text**: Every label, annotation, title, legend
+4. **Connections**: Every line, arrow, relationship (solid/dashed, direction, labels)
+5. **Visual Style**: Colors used, line thickness, fonts if identifiable
+6. **Hierarchy**: What's primary, secondary, nested structures
+7. **Data Flow**: Direction of processes, sequences, dependencies
+8. **Technical Details**: Protocols, technologies, specifications mentioned
+
+Provide output in this structured format:
+DIAGRAM_TYPE: [network/architecture/flowchart/etc]
+TITLE: [main title if any]
+COMPONENTS: [list each with: name, type, position, color, connected_to]
+CONNECTIONS: [list each with: from, to, type, label]
+LAYOUT: [describe spatial arrangement]
+TECHNICAL_CONTEXT: [technology stack, platform, domain]
+RECONSTRUCTION_PROMPT: [a detailed prompt that could recreate this diagram]
+"""
+        
+        response = await self.openai_client.chat.completions.create(
+            model="gpt-4o",  # Use GPT-4 Vision
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert at analyzing technical diagrams for complete reconstruction."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": extraction_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=4000,
+            temperature=0.1
+        )
+        
+        return self._parse_extraction_response(response.choices[0].message.content)
+    
+    async def generate_image_from_description(self, description: str, style: str = "technical") -> bytes:
+        """
+        Step 2: Generate image from extracted description
+        Using DALL-E 3 for best quality
+        """
+        # Enhance prompt for technical diagrams
+        enhanced_prompt = f"""Create a professional technical diagram with the following specifications:
+        
+Style: Clean, professional, technical documentation style
+Background: White
+Lines: Clear black lines for connections, use arrows where specified
+Components: Use standard shapes (rectangles for servers, clouds for internet/cloud services, cylinders for databases)
+Text: Clear, readable labels on all components
+        
+{description}
+
+Make it look like a professional architecture diagram from technical documentation."""
+        
+        try:
+            response = self.openai_client.images.generate(
+                model="dall-e-3",
+                prompt=enhanced_prompt,
+                size="1024x1024",
+                quality="standard",
+                n=1,
+            )
+            
+            # Download the image
+            image_url = response.data[0].url
+            image_response = requests.get(image_url)
+            return image_response.content
+            
+        except Exception as e:
+            print(f"Error generating image: {e}")
+            # Fallback to a diagram description if image generation fails
+            return None
+    
+    async def generate_document_from_analysis(self, 
+                                            analyzed_docs: List[Dict], 
+                                            template_type: str = "architecture") -> str:
+        """
+        Step 3: Generate new document based on analyzed documents
+        """
+        # Aggregate insights from analyzed documents
+        aggregated_context = self._aggregate_document_insights(analyzed_docs)
+        
+        generation_prompt = f"""Based on the following analyzed technical documents, create a new comprehensive document.
+
+ANALYZED CONTENT:
+{aggregated_context}
+
+REQUIREMENTS:
+1. Match the precision and technical depth of the original documents
+2. Include all relevant technical specifications
+3. Maintain consistent terminology
+4. Create logical sections and flow
+5. Include descriptions where visual diagrams were present
+6. Ensure technical accuracy
+
+Generate a complete technical document following the same standards as the originals."""
+        
+        response = await self.openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a technical documentation expert. Generate precise, technically accurate documents."
+                },
+                {
+                    "role": "user",
+                    "content": generation_prompt
+                }
+            ],
+            max_tokens=4000,
+            temperature=0.3
+        )
+        
+        return response.choices[0].message.content
+    
+    def _aggregate_document_insights(self, analyzed_docs: List[Dict]) -> str:
+        """Aggregate insights from multiple analyzed documents"""
+        insights = []
+        
+        for doc in analyzed_docs:
+            doc_summary = f"""
+Document: {doc.get('name', 'Unknown')}
+Key Components: {', '.join(doc.get('components', []))}
+Technologies: {', '.join(doc.get('technologies', []))}
+Architecture Pattern: {doc.get('pattern', 'N/A')}
+Visual Elements: {doc.get('visual_summary', 'N/A')}
+Key Insights: {doc.get('insights', 'N/A')}
+"""
+            insights.append(doc_summary)
+        
+        return "\n".join(insights)
