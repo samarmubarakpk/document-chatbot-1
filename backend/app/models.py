@@ -1,3 +1,4 @@
+# models.py - FIXED with diagram support
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -32,6 +33,8 @@ class QueryResponse(BaseModel):
     sources: List[SourceInfo]
     confidence: float
     documents_used: List[str]
+    image_url: Optional[str] = None  # ← ADDED for diagram support
+    diagram_generated: bool = False   # ← ADDED to indicate if diagram was created
     
 class DocumentResponse(BaseModel):
     document_id: str

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi-Document AI Chatbot</title>
+    <title>Multi-Document AI Chatbot - FIXED v2.1</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -14,6 +14,19 @@
         @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
         .spinner { animation: spin 1s linear infinite; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .answer-text { 
+            line-height: 1.7;
+            white-space: pre-wrap;
+        }
+        .answer-text ul {
+            list-style-type: disc;
+            margin-left: 1.5rem;
+            margin-top: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .answer-text li {
+            margin-bottom: 0.25rem;
+        }
     </style>
 </head>
 <body class="bg-gray-50">
@@ -24,7 +37,11 @@
 
         function MultiDocChatbot() {
             const [messages, setMessages] = useState([
-                { role: 'assistant', content: 'Hello! I can analyze multiple technical documents. Upload PDFs and select which to search, or search all at once.', timestamp: new Date() }
+                { 
+                    role: 'assistant', 
+                    content: '🚀 **FIXED v2.1** - Now with:\n• Precise, concise answers\n• Proper page/table citations\n• Diagram generation (WORKING!)\n• Better logical reasoning\n• Fixed image display\n\nUpload documents and ask technical questions!',
+                    timestamp: new Date() 
+                }
             ]);
             const [input, setInput] = useState('');
             const [isLoading, setIsLoading] = useState(false);
@@ -70,20 +87,26 @@
                         top_k: 10
                     });
 
+                    console.log('Response data:', response.data);
+
                     const assistantMessage = {
                         role: 'assistant',
                         content: response.data.answer,
                         sources: response.data.sources,
                         confidence: response.data.confidence,
                         documents_used: response.data.documents_used,
+                        imageUrl: response.data.image_url,  // HTTP URL from backend
+                        diagramGenerated: response.data.diagram_generated,
                         timestamp: new Date()
                     };
 
+                    console.log('Assistant message:', assistantMessage);
                     setMessages(prev => [...prev, assistantMessage]);
                 } catch (error) {
+                    console.error('Error:', error);
                     setMessages(prev => [...prev, {
                         role: 'assistant',
-                        content: 'Error processing your request. Please try again.',
+                        content: `❌ Error: ${error.response?.data?.detail || error.message}`,
                         isError: true,
                         timestamp: new Date()
                     }]);
@@ -115,7 +138,7 @@
                 } catch (error) {
                     setMessages(prev => [...prev, {
                         role: 'assistant',
-                        content: `❌ Failed to upload "${file.name}".`,
+                        content: `❌ Failed to upload "${file.name}": ${error.response?.data?.detail || error.message}`,
                         isError: true,
                         timestamp: new Date()
                     }]);
@@ -169,9 +192,9 @@
                 <div className="flex h-screen bg-gray-50">
                     {/* Sidebar */}
                     <div className="w-80 bg-white border-r border-gray-200 flex flex-col">
-                        <div className="p-6 border-b border-gray-200">
-                            <h1 className="text-2xl font-bold text-gray-800">Multi-Doc AI</h1>
-                            <p className="text-sm text-gray-600 mt-1">Intelligent Document Analysis</p>
+                        <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-indigo-500 to-purple-600">
+                            <h1 className="text-2xl font-bold text-white">Multi-Doc AI</h1>
+                            <p className="text-sm text-indigo-100 mt-1">✨ v2.1 - Images Working!</p>
                         </div>
 
                         <div className="p-4 border-b border-gray-200">
@@ -322,7 +345,7 @@
                                         key={index}
                                         className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} message-appear`}
                                     >
-                                        <div className="max-w-2xl">
+                                        <div className="max-w-3xl w-full">
                                             <div className={`rounded-lg px-4 py-3 ${
                                                 message.role === 'user'
                                                     ? 'bg-indigo-600 text-white'
@@ -330,7 +353,35 @@
                                                     ? 'bg-red-50 text-red-800 border border-red-200'
                                                     : 'bg-white border border-gray-200'
                                             }`}>
-                                                <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                                                <div className="answer-text text-sm">{message.content}</div>
+                                                
+                                                {/* FIXED IMAGE DISPLAY v2.1 */}
+                                                {message.imageUrl && (
+                                                    <div className="mt-4 pt-4 border-t border-gray-200">
+                                                        <p className="text-xs text-gray-600 mb-2 font-semibold">📊 Generated Diagram:</p>
+                                                        <img 
+                                                            src={message.imageUrl}
+                                                            alt="Generated network diagram"
+                                                            className="max-w-full border-2 border-indigo-200 rounded-lg shadow-lg cursor-pointer hover:shadow-xl transition-shadow"
+                                                            onClick={() => window.open(message.imageUrl, '_blank')}
+                                                            onError={(e) => {
+                                                                console.error('Image failed to load:', message.imageUrl);
+                                                                e.target.style.display = 'none';
+                                                                e.target.nextSibling.textContent = '❌ Image failed to load. Check console for details.';
+                                                            }}
+                                                        />
+                                                        <p className="text-xs text-gray-500 mt-1"></p>
+                                                        <a 
+                                                            href={message.imageUrl}
+                                                            download="diagram.png"
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="inline-block mt-2 text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                                                        >
+                                                            ⬇️ Download Diagram
+                                                        </a>
+                                                    </div>
+                                                )}
                                                 
                                                 {message.documents_used && message.documents_used.length > 0 && (
                                                     <div className="mt-2 pt-2 border-t border-gray-200">
@@ -346,21 +397,22 @@
                                                             onClick={() => toggleSources(index)}
                                                             className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
                                                         >
-                                                            {showSources[index] ? 'Hide' : 'Show'} Details ({message.sources.length})
+                                                            {showSources[index] ? '▼ Hide' : '▶ Show'} Citation Details ({message.sources.length})
                                                         </button>
                                                         
                                                         {showSources[index] && (
                                                             <div className="mt-2 space-y-2">
                                                                 {message.sources.map((source, sIndex) => (
-                                                                    <div key={sIndex} className="text-xs bg-gray-50 p-2 rounded">
-                                                                        <p className="font-medium text-gray-700">
-                                                                            {source.document_name} - Page {source.page}
+                                                                    <div key={sIndex} className="text-xs bg-gray-50 p-3 rounded border border-gray-200">
+                                                                        <p className="font-semibold text-gray-800">
+                                                                            📄 {source.document_name} - Page {source.page}
                                                                         </p>
                                                                         <p className="text-gray-600 mt-1">
-                                                                            Type: {source.type} | Score: {(source.relevance_score * 100).toFixed(1)}%
+                                                                            Type: <span className="font-medium">{source.type}</span> | 
+                                                                            Relevance: <span className="font-medium">{(source.relevance_score * 100).toFixed(1)}%</span>
                                                                         </p>
-                                                                        <p className="text-gray-500 mt-1 italic">
-                                                                            {source.excerpt}
+                                                                        <p className="text-gray-500 mt-2 italic border-l-2 border-gray-300 pl-2">
+                                                                            "{source.excerpt}"
                                                                         </p>
                                                                     </div>
                                                                 ))}
@@ -415,14 +467,14 @@
                                         value={input}
                                         onChange={(e) => setInput(e.target.value)}
                                         onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                                        placeholder="Ask about your documents..."
-                                        className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                        placeholder="Ask technical questions or request diagrams..."
+                                        className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
                                         disabled={isLoading}
                                     />
                                     <button
                                         onClick={handleSendMessage}
                                         disabled={!input.trim() || isLoading}
-                                        className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                                        className="px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                     >
                                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
@@ -430,9 +482,10 @@
                                     </button>
                                 </div>
                                 <p className="text-xs text-gray-500 mt-2">
+                                    💡 Try: "Draw site diagram" or "HSRP anomaly on Et0/2.6"
                                     {searchMode === 'all' 
-                                        ? `Searching across all ${uploadedDocuments.length} documents`
-                                        : `Searching in ${selectedDocuments.length} selected document(s)`
+                                        ? ` • Searching all ${uploadedDocuments.length} documents`
+                                        : ` • Searching ${selectedDocuments.length} selected document(s)`
                                     }
                                 </p>
                             </div>
