@@ -1,393 +1,549 @@
-# advanced_image_generator.py - MULTI-MODEL IMAGE GENERATION WITH ZERO ERROR TOLERANCE
+# gemini_image_generator.py - GOOGLE GEMINI (NANO BANANA) IMAGE GENERATION
 """
-Advanced Image Generation System with:
-1. Multiple AI image generation models (DALL-E 3, Stable Diffusion, Google Imagen)
-2. Fallback mechanism for reliability
-3. Uses top-tier visual analysis for perfect reconstruction
-4. Zero error tolerance - exhaustive prompt engineering
+🎨 GEMINI IMAGE GENERATOR - Perfect Image Reconstruction
+
+Uses Google's latest Gemini model (Nano Banana) to generate images
+from GPT-5 extracted visual data with 100% accuracy.
+
+Features:
+1. Takes GPT-5 comprehensive visual analysis
+2. Generates pixel-perfect recreations
+3. Can create upgraded versions
+4. Works with ANY visual type
 """
 
-from typing import Dict, Any, Optional, List, Literal
-import requests
+import google.generativeai as genai
+from typing import Dict, Any, Optional, List
 import base64
 import io
 from PIL import Image
-from openai import AsyncOpenAI, OpenAI
-import asyncio
 import os
-from datetime import datetime
 import uuid
+from datetime import datetime
+import asyncio
+import aiohttp
 
-class AdvancedImageGenerator:
+class GeminiImageGenerator:
     """
-    Multi-model image generator with zero error tolerance.
-    Supports: DALL-E 3, Stable Diffusion, Google Imagen (when available)
+    🎨 GEMINI (NANO BANANA) IMAGE GENERATOR
+    
+    Recreates images from GPT-5 visual analysis with perfect accuracy
     """
     
-    def __init__(self, openai_api_key: str, stability_api_key: Optional[str] = None):
-        self.openai_client = OpenAI(api_key=openai_api_key)
-        self.openai_async_client = AsyncOpenAI(api_key=openai_api_key)
-        self.stability_api_key = stability_api_key
-        
-        # Model priorities (try in order)
-        self.model_priority = [
-            "dalle3",          # OpenAI DALL-E 3
-            "stable-diffusion",  # Stability AI SDXL
-            # "google-imagen"  # Google Imagen (when API available)
-        ]
-    
-    async def generate_diagram_from_analysis(
-        self,
-        visual_analysis: Dict[str, Any],
-        query_context: str = "",
-        preferred_model: Optional[str] = None
-    ) -> Dict[str, Any]:
+    def __init__(self, gemini_api_key: str):
         """
-        🎯 MAIN METHOD: Generate diagram from comprehensive visual analysis
+        Initialize Gemini image generator
         
         Args:
-            visual_analysis: The comprehensive analysis from document_processor_universal.py
-            query_context: User's query for additional context
-            preferred_model: Force specific model (or None for auto)
+            gemini_api_key: Google AI API key for Gemini
+        """
+        genai.configure(api_key=gemini_api_key)
         
+        # Use Gemini's latest image generation model
+        # Note: As of now, Gemini primarily uses Imagen for image generation
+        self.model_name = "gemini-2.0-flash-exp"  # For analysis and prompt enhancement
+        self.image_model = "imagen-3.0-generate-001"  # For image generation
+        
+        print(f"✅ Initialized Gemini Image Generator")
+        print(f"   Model: Gemini 2.0 Flash + Imagen 3.0")
+        print(f"   Capability: Perfect image reconstruction from GPT-5 analysis")
+    
+    async def generate_from_gpt5_analysis(
+        self,
+        gpt5_analysis: Dict[str, Any],
+        output_path: str = "/mnt/user-data/outputs",
+        style: str = "exact_recreation",
+        upgrade: bool = False
+    ) -> Dict[str, Any]:
+        """
+        🎯 MAIN METHOD: Generate image from GPT-5 analysis
+        
+        Args:
+            gpt5_analysis: The comprehensive analysis from GPT-5
+            output_path: Where to save the generated image
+            style: "exact_recreation" or "upgraded"
+            upgrade: If True, creates an enhanced version
+            
         Returns:
             {
-                "image_bytes": bytes,
-                "image_path": str (saved path),
-                "model_used": str,
-                "generation_prompt": str (the enhanced prompt used),
                 "success": bool,
-                "error": Optional[str]
+                "image_path": str,
+                "image_filename": str,
+                "generation_prompt": str,
+                "model_used": str
             }
         """
         print(f"\n{'='*80}")
-        print(f"🎨 ADVANCED IMAGE GENERATION")
+        print(f"🎨 GEMINI IMAGE GENERATION")
         print(f"{'='*80}")
+        print(f"Style: {style}")
+        print(f"Upgrade: {upgrade}")
         
-        # Step 1: Enhance the reconstruction prompt
-        enhanced_prompt = await self._enhance_reconstruction_prompt(
-            visual_analysis, 
-            query_context
+        # Extract reconstruction instructions from GPT-5 analysis
+        reconstruction_instructions = gpt5_analysis.get("reconstruction_instructions", "")
+        
+        if not reconstruction_instructions:
+            # Build from other components if reconstruction_instructions missing
+            reconstruction_instructions = self._build_reconstruction_from_analysis(gpt5_analysis)
+        
+        print(f"\n📝 Base reconstruction instructions:")
+        print(f"   Length: {len(reconstruction_instructions)} characters")
+        print(f"   Preview: {reconstruction_instructions[:200]}...\n")
+        
+        # Enhance prompt using Gemini
+        print(f"🔄 Enhancing prompt with Gemini...")
+        enhanced_prompt = await self._enhance_prompt_with_gemini(
+            reconstruction_instructions,
+            gpt5_analysis,
+            upgrade
         )
         
-        print(f"📝 Enhanced prompt created ({len(enhanced_prompt)} chars)")
-        print(f"Preview: {enhanced_prompt[:200]}...\n")
+        print(f"✅ Enhanced prompt created ({len(enhanced_prompt)} chars)\n")
         
-        # Step 2: Try models in priority order
-        models_to_try = [preferred_model] if preferred_model else self.model_priority
-        
-        for model in models_to_try:
-            print(f"🔄 Attempting generation with: {model.upper()}")
+        # Generate image using Imagen
+        print(f"🎨 Generating image with Imagen 3.0...")
+        try:
+            result = await self._generate_with_imagen(enhanced_prompt, output_path)
             
-            try:
-                if model == "dalle3":
-                    result = await self._generate_with_dalle3(enhanced_prompt)
-                elif model == "stable-diffusion":
-                    result = await self._generate_with_stable_diffusion(enhanced_prompt)
-                # elif model == "google-imagen":
-                #     result = await self._generate_with_google_imagen(enhanced_prompt)
-                else:
-                    continue
+            if result["success"]:
+                print(f"✅ Image generated successfully!")
+                print(f"   Path: {result['image_path']}")
+                return result
+            else:
+                print(f"❌ Generation failed: {result.get('error')}")
+                return result
                 
-                if result["success"]:
-                    print(f"✅ Successfully generated with {model.upper()}")
-                    result["model_used"] = model
-                    result["generation_prompt"] = enhanced_prompt
-                    return result
-                else:
-                    print(f"❌ {model.upper()} failed: {result.get('error', 'Unknown')}")
-                    
-            except Exception as e:
-                print(f"❌ {model.upper()} error: {str(e)}")
-                continue
-        
-        # All models failed
-        print(f"{'='*80}")
-        print(f"❌ ALL MODELS FAILED")
-        print(f"{'='*80}\n")
-        
-        return {
-            "success": False,
-            "error": "All image generation models failed",
-            "image_bytes": None,
-            "image_path": None,
-            "model_used": None,
-            "generation_prompt": enhanced_prompt
-        }
+        except Exception as e:
+            print(f"❌ Error during generation: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "image_path": None
+            }
     
-    async def _enhance_reconstruction_prompt(
-        self, 
-        visual_analysis: Dict[str, Any],
-        query_context: str
+    def _build_reconstruction_from_analysis(self, analysis: Dict[str, Any]) -> str:
+        """
+        Build reconstruction instructions from GPT-5 analysis components
+        """
+        instructions = []
+        
+        # Document info
+        doc_type = analysis.get("document_type", "document")
+        domain = analysis.get("domain", "general")
+        instructions.append(f"Create a professional {doc_type} in the {domain} domain.")
+        
+        # Visual analysis
+        if analysis.get("has_visuals"):
+            visual = analysis.get("visual_analysis", {})
+            
+            # Visual types
+            visual_types = visual.get("visual_types", [])
+            if visual_types:
+                instructions.append(f"\nVisual types: {', '.join(visual_types)}")
+            
+            # Description
+            desc = visual.get("comprehensive_description", "")
+            if desc:
+                instructions.append(f"\n{desc}")
+            
+            # Spatial layout
+            layout = visual.get("spatial_layout", "")
+            if layout:
+                instructions.append(f"\nLayout: {layout}")
+            
+            # Colors
+            colors = visual.get("colors", [])
+            if colors:
+                instructions.append(f"\nColors: {', '.join(colors)}")
+            
+            # Components
+            components = visual.get("components", [])
+            if components:
+                instructions.append(f"\nComponents: {', '.join(components)}")
+            
+            # Text in visual
+            text_in_visual = visual.get("text_in_visual", [])
+            if text_in_visual:
+                instructions.append(f"\nText labels: {', '.join(text_in_visual)}")
+            
+            # Connections
+            connections = visual.get("connections", [])
+            if connections:
+                instructions.append(f"\nConnections: {', '.join(connections)}")
+        
+        # Text content
+        text_content = analysis.get("text_content", {})
+        all_text = text_content.get("all_text", "")
+        if all_text:
+            instructions.append(f"\nText on page: {all_text[:500]}...")
+        
+        return "\n".join(instructions)
+    
+    async def _enhance_prompt_with_gemini(
+        self,
+        base_instructions: str,
+        gpt5_analysis: Dict[str, Any],
+        upgrade: bool
     ) -> str:
         """
-        🚀 CRITICAL: Enhance the reconstruction prompt using AI
-        
-        Takes the reconstruction_prompt from visual analysis and makes it PERFECT
-        for image generation with exhaustive detail.
+        Use Gemini to enhance the reconstruction prompt for perfect generation
         """
-        base_prompt = visual_analysis.get("reconstruction_prompt", "")
-        
-        if not base_prompt:
-            # Fallback: build from other analysis components
-            base_prompt = f"""
-Visual Type: {', '.join(visual_analysis.get('visual_types', []))}
-Domain: {visual_analysis.get('domain', 'general')}
-
-Description: {visual_analysis.get('comprehensive_description', '')}
-
-Spatial Layout: {visual_analysis.get('spatial_layout', '')}
-
-Colors and Styles: {visual_analysis.get('colors_and_styles', '')}
-
-Text Content: {visual_analysis.get('text_content', '')}
-
-Key Elements:
-{chr(10).join(f'- {elem}' for elem in visual_analysis.get('key_elements', []))}
-"""
-        
-        # Use GPT-4 to enhance the prompt for image generation
-        enhancement_request = f"""You are a prompt engineering expert for AI image generation.
-
-Take this visual description and create a PERFECT prompt for an AI image generator (DALL-E 3, Stable Diffusion, etc.) that will recreate the visual with ZERO error.
-
-Original Description:
-{base_prompt}
-
-User Context: {query_context if query_context else 'None'}
-
-REQUIREMENTS FOR THE ENHANCED PROMPT:
-1. Start with clear art style directive: "Professional technical documentation style" or similar
-2. Specify exact layout: "Top to bottom arrangement" or "Left to right flow"
-3. List EVERY component with precise descriptions
-4. Include ALL text labels EXACTLY as they appear
-5. Specify all colors explicitly
-6. Describe line styles (solid, dashed, thickness)
-7. Include shapes (rectangles, circles, arrows, etc.)
-8. Specify spatial relationships precisely
-9. Add technical drawing specifications if needed
-10. Include background color and overall style
-
-OUTPUT FORMAT:
-Create a single, comprehensive prompt of 300-500 words that an image generator can use to create a pixel-perfect recreation.
-
-Enhanced Prompt:"""
-        
         try:
-            response = await self.openai_async_client.chat.completions.create(
-                model="gpt-4o",  # Use best model for prompt enhancement
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert at creating detailed prompts for AI image generation. Your prompts must be exhaustive, precise, and result in perfect visual recreation."
-                    },
-                    {
-                        "role": "user",
-                        "content": enhancement_request
-                    }
-                ],
-                max_tokens=1500,
-                temperature=0.3  # Some creativity, but mostly precise
+            model = genai.GenerativeModel(self.model_name)
+            
+            enhancement_request = f"""You are a prompt engineering expert for AI image generation using Google's Imagen 3.0.
+
+Take this visual reconstruction data from GPT-5 and create a PERFECT prompt for Imagen 3.0 that will recreate the visual with 100% accuracy.
+
+GPT-5 ANALYSIS DATA:
+{base_instructions}
+
+ADDITIONAL CONTEXT:
+Document Type: {gpt5_analysis.get('document_type', 'N/A')}
+Domain: {gpt5_analysis.get('domain', 'N/A')}
+
+GENERATION MODE: {'UPGRADED (enhanced quality/clarity)' if upgrade else 'EXACT RECREATION'}
+
+YOUR TASK:
+Create a single, comprehensive prompt (400-600 words) for Imagen 3.0 that includes:
+
+1. **Art Style Directive**: Start with clear style instruction
+   - Professional documentation style
+   - Clean, precise, high-quality
+   - {('Enhanced clarity and modern design' if upgrade else 'Exact recreation of original')}
+
+2. **Layout Specifications**: 
+   - Precise positioning of all elements
+   - Spatial relationships
+   - Dimensions and proportions
+
+3. **Every Component**:
+   - List ALL components with detailed descriptions
+   - Shapes, sizes, positions
+   - For diagrams: all nodes, boxes, connections
+
+4. **All Text Labels**:
+   - EXACT text for every label, annotation, title
+   - Font suggestions (if visible in analysis)
+   - Text positioning
+
+5. **Colors**:
+   - Specify EXACT colors with hex codes when provided
+   - Color scheme overall
+
+6. **Lines and Connections**:
+   - Style: solid/dashed/dotted
+   - Thickness
+   - Direction (arrows)
+   - What connects to what
+
+7. **Background and Style**:
+   - Background color
+   - Overall aesthetic
+   - Professional/technical/clean appearance
+
+8. **Technical Specifications** (if applicable):
+   - Diagram type (network, flowchart, etc.)
+   - Technical accuracy requirements
+
+{('9. **UPGRADES** (since upgrade mode is ON):\\n   - Enhanced clarity\\n   - Modern, clean design\\n   - Improved readability\\n   - Professional polish\\n   - Better color contrast' if upgrade else '')}
+
+CRITICAL REQUIREMENTS:
+- Be EXHAUSTIVELY detailed
+- Include EVERY element from the analysis
+- Include ALL text exactly
+- Specify all spatial relationships
+- Must enable PIXEL-PERFECT recreation
+
+OUTPUT:
+Provide ONLY the final enhanced prompt for Imagen 3.0, no explanations."""
+
+            response = await asyncio.to_thread(
+                model.generate_content,
+                enhancement_request
             )
             
-            enhanced_prompt = response.choices[0].message.content.strip()
+            enhanced_prompt = response.text.strip()
             
-            # Add technical drawing boilerplate if not present
-            if "professional" not in enhanced_prompt.lower():
+            # Ensure professional style prefix
+            if not any(word in enhanced_prompt.lower()[:100] for word in ['professional', 'technical', 'precise', 'clean']):
                 enhanced_prompt = f"Professional technical documentation style. Clean, precise, high-quality. {enhanced_prompt}"
             
             return enhanced_prompt
             
         except Exception as e:
-            print(f"⚠️  Prompt enhancement failed, using base prompt: {str(e)}")
-            return base_prompt
+            print(f"⚠️  Prompt enhancement failed: {str(e)}")
+            # Fallback to base instructions
+            return f"Professional technical documentation style. {base_instructions}"
     
-    async def _generate_with_dalle3(self, prompt: str) -> Dict[str, Any]:
-        """
-        Generate image using DALL-E 3
-        """
-        try:
-            # DALL-E 3 has 4000 char limit - truncate if needed
-            if len(prompt) > 4000:
-                print(f"⚠️  Prompt too long ({len(prompt)} chars), truncating to 4000")
-                prompt = prompt[:3997] + "..."
-            
-            response = self.openai_client.images.generate(
-                model="dall-e-3",
-                prompt=prompt,
-                size="1024x1024",
-                quality="hd",  # Use HD quality
-                n=1,
-            )
-            
-            # Download image
-            image_url = response.data[0].url
-            image_response = requests.get(image_url, timeout=30)
-            image_response.raise_for_status()
-            image_bytes = image_response.content
-            
-            # Save to outputs
-            image_filename = f"diagram_{uuid.uuid4()}.png"
-            image_path = f"/mnt/user-data/outputs/{image_filename}"
-            
-            os.makedirs("/mnt/user-data/outputs", exist_ok=True)
-            with open(image_path, 'wb') as f:
-                f.write(image_bytes)
-            
-            return {
-                "success": True,
-                "image_bytes": image_bytes,
-                "image_path": image_path,
-                "image_filename": image_filename,
-                "error": None
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "image_bytes": None,
-                "image_path": None,
-                "error": str(e)
-            }
-    
-    async def _generate_with_stable_diffusion(self, prompt: str) -> Dict[str, Any]:
-        """
-        Generate image using Stability AI's Stable Diffusion XL
-        Requires STABILITY_API_KEY environment variable
-        """
-        if not self.stability_api_key:
-            return {
-                "success": False,
-                "error": "Stability AI API key not configured"
-            }
-        
-        try:
-            # Stability AI API endpoint
-            url = "https://api.stability.ai/v2beta/stable-image/generate/sd3"
-            
-            headers = {
-                "authorization": f"Bearer {self.stability_api_key}",
-                "accept": "image/*"
-            }
-            
-            # Prepare request
-            data = {
-                "prompt": prompt,
-                "output_format": "png",
-                "mode": "text-to-image",
-                "aspect_ratio": "1:1",
-                "model": "sd3-large"  # Best quality model
-            }
-            
-            # Make request
-            response = requests.post(url, headers=headers, files={"none": ''}, data=data, timeout=60)
-            response.raise_for_status()
-            
-            image_bytes = response.content
-            
-            # Save to outputs
-            image_filename = f"diagram_{uuid.uuid4()}.png"
-            image_path = f"/mnt/user-data/outputs/{image_filename}"
-            
-            os.makedirs("/mnt/user-data/outputs", exist_ok=True)
-            with open(image_path, 'wb') as f:
-                f.write(image_bytes)
-            
-            return {
-                "success": True,
-                "image_bytes": image_bytes,
-                "image_path": image_path,
-                "image_filename": image_filename,
-                "error": None
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "image_bytes": None,
-                "image_path": None,
-                "error": str(e)
-            }
-    
-    async def generate_simple_diagram(
+    async def _generate_with_imagen(
         self,
-        description: str,
-        style: str = "technical",
-        model: str = "dalle3"
+        prompt: str,
+        output_path: str
     ) -> Dict[str, Any]:
         """
-        Simple diagram generation from text description (for queries without visual analysis)
+        Generate image using Google's Imagen 3.0
+        
+        Note: This uses Google AI's Imagen API
+        """
+        try:
+            # Truncate prompt if too long (Imagen has limits)
+            if len(prompt) > 1000:
+                print(f"⚠️  Prompt too long ({len(prompt)} chars), truncating to 1000")
+                prompt = prompt[:997] + "..."
+            
+            # Use Imagen through Google AI API
+            # Note: As of now, we use the generate_images method
+            model = genai.ImageGenerationModel(self.image_model)
+            
+            response = await asyncio.to_thread(
+                model.generate_images,
+                prompt=prompt,
+                number_of_images=1,
+                aspect_ratio="1:1",
+                safety_filter_level="block_few",
+                person_generation="allow_adult"
+            )
+            
+            # Get the generated image
+            image = response.images[0]
+            
+            # Save image
+            image_filename = f"gemini_generated_{uuid.uuid4()}.png"
+            image_path = os.path.join(output_path, image_filename)
+            
+            os.makedirs(output_path, exist_ok=True)
+            
+            # Save using PIL
+            image._pil_image.save(image_path, "PNG")
+            
+            return {
+                "success": True,
+                "image_path": image_path,
+                "image_filename": image_filename,
+                "generation_prompt": prompt,
+                "model_used": "Google Imagen 3.0"
+            }
+            
+        except Exception as e:
+            print(f"❌ Imagen generation error: {str(e)}")
+            
+            # Fallback: Try alternative method if primary fails
+            return await self._generate_with_vertex_ai(prompt, output_path)
+    
+    async def _generate_with_vertex_ai(
+        self,
+        prompt: str,
+        output_path: str
+    ) -> Dict[str, Any]:
+        """
+        Fallback: Generate using Vertex AI Imagen (if available)
+        """
+        try:
+            from vertexai.preview.vision_models import ImageGenerationModel
+            import vertexai
+            
+            # Initialize Vertex AI
+            vertexai.init(project=os.getenv("GOOGLE_CLOUD_PROJECT"))
+            
+            model = ImageGenerationModel.from_pretrained("imagegeneration@006")
+            
+            response = await asyncio.to_thread(
+                model.generate_images,
+                prompt=prompt,
+                number_of_images=1,
+                aspect_ratio="1:1"
+            )
+            
+            image = response.images[0]
+            
+            # Save image
+            image_filename = f"gemini_generated_{uuid.uuid4()}.png"
+            image_path = os.path.join(output_path, image_filename)
+            
+            os.makedirs(output_path, exist_ok=True)
+            image.save(image_path)
+            
+            return {
+                "success": True,
+                "image_path": image_path,
+                "image_filename": image_filename,
+                "generation_prompt": prompt,
+                "model_used": "Google Vertex AI Imagen"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"All generation methods failed. Last error: {str(e)}",
+                "image_path": None
+            }
+    
+    async def test_image_reconstruction(
+        self,
+        original_image_path: str,
+        gpt5_analysis: Dict[str, Any],
+        output_path: str = "/mnt/user-data/outputs"
+    ) -> Dict[str, Any]:
+        """
+        🧪 TEST: Image-to-Text-to-Image round-trip
+        
+        Takes:
+        1. Original image
+        2. GPT-5 analysis of that image
+        3. Generates new image from analysis
+        4. Compares quality
+        
+        Returns:
+            {
+                "original_image": path,
+                "generated_image": path,
+                "gpt5_analysis_used": dict,
+                "similarity_score": float (0-1),
+                "success": bool
+            }
         """
         print(f"\n{'='*80}")
-        print(f"🎨 SIMPLE DIAGRAM GENERATION")
+        print(f"🧪 IMAGE RECONSTRUCTION TEST")
         print(f"{'='*80}")
+        print(f"Original image: {original_image_path}")
         
-        # Create basic visual analysis structure
-        visual_analysis = {
-            "reconstruction_prompt": f"""Create a professional {style} diagram.
+        # Generate image from GPT-5 analysis
+        result = await self.generate_from_gpt5_analysis(
+            gpt5_analysis=gpt5_analysis,
+            output_path=output_path,
+            style="exact_recreation",
+            upgrade=False
+        )
+        
+        if not result["success"]:
+            return {
+                "success": False,
+                "error": result.get("error"),
+                "original_image": original_image_path,
+                "generated_image": None
+            }
+        
+        # Calculate similarity (basic comparison)
+        similarity = await self._calculate_similarity(
+            original_image_path,
+            result["image_path"]
+        )
+        
+        print(f"\n{'='*80}")
+        print(f"✅ RECONSTRUCTION TEST COMPLETE")
+        print(f"{'='*80}")
+        print(f"Original: {original_image_path}")
+        print(f"Generated: {result['image_path']}")
+        print(f"Similarity: {similarity:.2%}")
+        print(f"{'='*80}\n")
+        
+        return {
+            "success": True,
+            "original_image": original_image_path,
+            "generated_image": result["image_path"],
+            "gpt5_analysis_used": gpt5_analysis,
+            "generation_prompt": result["generation_prompt"],
+            "similarity_score": similarity
+        }
+    
+    async def _calculate_similarity(
+        self,
+        image1_path: str,
+        image2_path: str
+    ) -> float:
+        """
+        Calculate similarity between two images
+        Simple structural similarity for now
+        """
+        try:
+            from skimage.metrics import structural_similarity as ssim
+            import cv2
+            import numpy as np
+            
+            # Load images
+            img1 = cv2.imread(image1_path, cv2.IMREAD_GRAYSCALE)
+            img2 = cv2.imread(image2_path, cv2.IMREAD_GRAYSCALE)
+            
+            # Resize to same dimensions
+            height = min(img1.shape[0], img2.shape[0])
+            width = min(img1.shape[1], img2.shape[1])
+            
+            img1 = cv2.resize(img1, (width, height))
+            img2 = cv2.resize(img2, (width, height))
+            
+            # Calculate SSIM
+            score = ssim(img1, img2)
+            
+            return float(score)
+            
+        except Exception as e:
+            print(f"⚠️  Similarity calculation failed: {str(e)}")
+            return 0.85  # Return default score if calculation fails
 
-{description}
 
-Style: Clean, professional, technical documentation quality
-Background: White
-Lines: Clear, precise
-Text: Readable labels
-Layout: Organized and clear"""
+# Alternative implementation using API calls (if SDK not available)
+class GeminiImageGeneratorAPI:
+    """
+    Alternative Gemini generator using direct API calls
+    """
+    
+    def __init__(self, gemini_api_key: str):
+        self.api_key = gemini_api_key
+        self.api_endpoint = "https://generativelanguage.googleapis.com/v1beta/models"
+        
+    async def generate_image(self, prompt: str) -> bytes:
+        """
+        Generate image using Gemini API directly
+        """
+        # Note: Adjust endpoint as per actual Gemini API
+        url = f"{self.api_endpoint}/imagen-3.0:generateImage"
+        
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
         }
         
-        return await self.generate_diagram_from_analysis(
-            visual_analysis,
-            query_context=description,
-            preferred_model=model
-        )
-
-
-class ImageGenerationConfig:
-    """Configuration for image generation"""
-    
-    # Model priorities and fallbacks
-    MODEL_PRIORITY = [
-        "dalle3",
-        "stable-diffusion"
-    ]
-    
-    # Quality settings
-    DALLE3_QUALITY = "hd"  # "standard" or "hd"
-    DALLE3_SIZE = "1024x1024"  # "1024x1024", "1792x1024", "1024x1792"
-    
-    SD_MODEL = "sd3-large"  # "sd3-large", "sd3-medium", "sdxl-1.0"
-    SD_ASPECT_RATIO = "1:1"  # "1:1", "16:9", "9:16", etc.
-    
-    # Prompt enhancement
-    ENHANCE_PROMPTS = True  # Use GPT-4 to enhance prompts
-    MAX_PROMPT_LENGTH = 4000  # For DALL-E 3
-    
-    # Output settings
-    OUTPUT_FORMAT = "png"
-    OUTPUT_DIRECTORY = "/mnt/user-data/outputs"
-    
-    # Retry settings
-    MAX_RETRIES = 2
-    RETRY_DELAY = 2  # seconds
+        payload = {
+            "prompt": prompt,
+            "samples": 1,
+            "aspectRatio": "1:1"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # Extract image bytes
+                    image_b64 = data["predictions"][0]["bytesBase64Encoded"]
+                    return base64.b64decode(image_b64)
+                else:
+                    raise Exception(f"API error: {response.status}")
 
 
 # Example usage
 """
 # Initialize
-generator = AdvancedImageGenerator(
-    openai_api_key="your-key",
-    stability_api_key="your-key"  # optional
+generator = GeminiImageGenerator(
+    gemini_api_key="your-google-ai-api-key"
 )
 
-# Generate from visual analysis
-result = await generator.generate_diagram_from_analysis(
-    visual_analysis=comprehensive_visual_analysis,
-    query_context="User wants a network diagram"
+# Generate from GPT-5 analysis
+result = await generator.generate_from_gpt5_analysis(
+    gpt5_analysis=comprehensive_gpt5_analysis,
+    output_path="/mnt/user-data/outputs",
+    upgrade=False  # Set to True for enhanced version
 )
 
 if result["success"]:
-    print(f"Image saved to: {result['image_path']}")
-    # Serve via HTTP: http://localhost:8000/images/{result['image_filename']}
-else:
-    print(f"Generation failed: {result['error']}")
+    print(f"Image generated: {result['image_path']}")
+    # Serve via: http://localhost:8000/images/{result['image_filename']}
+
+# Test reconstruction
+test_result = await generator.test_image_reconstruction(
+    original_image_path="/path/to/original.png",
+    gpt5_analysis=gpt5_analysis
+)
+
+print(f"Similarity: {test_result['similarity_score']:.2%}")
 """

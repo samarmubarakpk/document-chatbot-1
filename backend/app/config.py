@@ -6,8 +6,9 @@ from typing import Optional
 class Settings(BaseSettings):
     # OpenAI Configuration
     OPENAI_API_KEY: str
-    OPENAI_MODEL: str = "gpt-4o"  # Updated to GPT-4 Omni
-    OPENAI_VISION_MODEL: str = "gpt-4o"  # GPT-4 Omni has vision built-in
+    GEMINI_API_KEY: str
+    OPENAI_MODEL: str = "gpt-5-nano-2025-08-07"  # Updated to GPT-4 Omni
+    OPENAI_VISION_MODEL: str = "gpt-5-nano-2025-08-07"  # GPT-4 Omni has vision built-in
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-large"
     
     # Qdrant Configuration
