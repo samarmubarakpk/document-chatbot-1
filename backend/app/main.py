@@ -1,14 +1,7 @@
-# main_universal.py - UNIVERSAL API WITH GPT-5 + GEMINI
+# main.py - IMPROVED WITH BETTER LLM PROMPTING
 """
-🚀 UNIVERSAL MULTI-DOCUMENT CHATBOT API
-Zero Hardcoding - Works with ANY Document Type
-
-Features:
-- GPT-5 powered visual analysis (gpt-5-nano-2025-08-07)
-- Gemini (Nano Banana) image generation
-- 100% accurate image reconstruction
-- Modular workflow
-- Works with ANY document type
+🚀 UNIVERSAL MULTI-DOCUMENT CHATBOT API - PRODUCTION VERSION
+Enhanced prompting for accurate answer extraction
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -21,10 +14,7 @@ from datetime import datetime
 import uuid
 import logging
 
-# Import our new universal modules
 from app.document_processor import GPT5UniversalProcessor
-from app.advanced_image_generator import GeminiImageGenerator
-from app.workflow_manager import ModularWorkflow
 from app.retrieval_engine import HybridRetriever
 from app.models import (
     QueryRequest, QueryResponse, DocumentResponse,
@@ -32,12 +22,15 @@ from app.models import (
 )
 from app.config import settings
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Universal AI Document Intelligence API",
-    description="GPT-5 + Gemini - Zero Hardcoding - 100% Accuracy"
+    description="Production-ready document Q&A with hybrid retrieval"
 )
 
 app.add_middleware(
@@ -48,24 +41,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize UNIVERSAL components
+# Initialize components
 gpt5_processor = GPT5UniversalProcessor(
     openai_api_key=settings.OPENAI_API_KEY,
     qdrant_host=settings.QDRANT_HOST,
     qdrant_port=settings.QDRANT_PORT
 )
 
-gemini_generator = GeminiImageGenerator(
-    gemini_api_key=os.getenv("GEMINI_API_KEY", "")  # User must provide
-)
-
 retriever = HybridRetriever()
-
-workflow_manager = ModularWorkflow(
-    gpt5_processor=gpt5_processor,
-    gemini_generator=gemini_generator,
-    retriever=retriever
-)
 
 # Document registry
 document_registry: Dict[str, Dict[str, Any]] = {}
@@ -78,44 +61,21 @@ os.makedirs(OUTPUTS_DIR, exist_ok=True)
 async def startup_event():
     """Initialize on startup"""
     await gpt5_processor.initialize_collections()
-    workflow_manager.print_workflow_diagram()
-    logger.info("✅ Universal API initialized with GPT-5 + Gemini")
+    logger.info("✅ Universal API initialized")
 
 @app.get("/")
 async def root():
     return {
         "service": "Universal AI Document Intelligence",
-        "version": "2.0",
+        "version": "3.0 - Production",
+        "status": "operational",
         "features": [
-            "GPT-5 powered visual analysis (gpt-5-nano-2025-08-07)",
-            "Google Gemini (Nano Banana) image generation",
-            "100% accurate image reconstruction",
-            "Zero hardcoding - works with ANY document type",
-            "Modular workflow (10 steps)",
-            "Image-to-Text-to-Image testing"
-        ],
-        "models": {
-            "text_analysis": "gpt-5-nano-2025-08-07",
-            "vision_analysis": "gpt-5-nano-2025-08-07",
-            "image_generation": "Google Gemini (Nano Banana) + Imagen 3.0",
-            "embedding": "text-embedding-3-large"
-        }
+            "Hybrid retrieval (semantic + keyword)",
+            "Smart ranking and scoring",
+            "Works with any document type",
+            "No hardcoding"
+        ]
     }
-
-@app.get("/workflow-diagram")
-async def get_workflow_diagram():
-    """Get the workflow diagram"""
-    return {
-        "diagram": workflow_manager.get_workflow_diagram()
-    }
-
-@app.get("/images/{filename}")
-async def serve_image(filename: str):
-    """Serve generated images"""
-    file_path = os.path.join(OUTPUTS_DIR, filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(file_path, media_type="image/png")
 
 @app.post("/upload", response_model=DocumentResponse)
 async def upload_document(
@@ -124,59 +84,50 @@ async def upload_document(
     description: Optional[str] = None,
     tags: Optional[str] = None
 ):
-    """
-    Upload and process ANY document type using GPT-5
-    
-    This executes PHASE 1 of the workflow
-    """
+    """Upload and process documents"""
     tmp_path = None
     try:
-        # Save to temp file
         suffix = os.path.splitext(file.filename)[1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             content = await file.read()
             tmp.write(content)
             tmp_path = tmp.name
         
-        logger.info(f"📄 Processing: {file.filename} (GPT-5 Universal)")
+        logger.info(f"📄 Processing: {file.filename}")
         
-        # Execute Phase 1 of workflow
-        phase1_result = await workflow_manager.execute_phase_1(
+        result = await gpt5_processor.process_document(
             file_path=tmp_path,
             document_name=file.filename
         )
         
-        # Create metadata
         metadata = DocumentMetadata(
             category=category,
             description=description,
             tags=tags.split(",") if tags else [],
             upload_date=datetime.now(),
             file_size=len(content),
-            page_count=phase1_result["page_count"]
+            page_count=result["page_count"]
         )
         
-        # Register document
-        document_registry[phase1_result["document_id"]] = {
-            "document_id": phase1_result["document_id"],
+        document_registry[result["document_id"]] = {
+            "document_id": result["document_id"],
             "document_name": file.filename,
             "metadata": metadata.dict(),
-            "chunks_created": phase1_result["chunks_created"],
-            "page_count": phase1_result["page_count"],
-            "upload_date": datetime.now().isoformat(),
-            "workflow_id": phase1_result["workflow_id"]
+            "chunks_created": result["chunks_created"],
+            "page_count": result["page_count"],
+            "upload_date": datetime.now().isoformat()
         }
         
         return DocumentResponse(
-            document_id=phase1_result["document_id"],
+            document_id=result["document_id"],
             document_name=file.filename,
             status="success",
-            chunks_created=phase1_result["chunks_created"],
+            chunks_created=result["chunks_created"],
             metadata=metadata
         )
     
     except Exception as e:
-        logger.error(f"❌ Error: {str(e)}")
+        logger.error(f"❌ Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     
     finally:
@@ -189,167 +140,178 @@ async def upload_document(
 @app.post("/query")
 async def query_documents(request: QueryRequest):
     """
-    Query documents and optionally generate images
-    
-    This can execute PHASE 2 of the workflow if image generation is requested
+    Query documents with improved LLM prompting
     """
     try:
-        logger.info(f"\n🔍 QUERY: {request.query}")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"🔍 NEW QUERY: {request.query}")
+        logger.info(f"{'='*80}")
         
-        # Check if user wants image generation
-        image_keywords = ["draw", "diagram", "visualize", "create diagram",
-                         "show diagram", "generate diagram", "illustrate",
-                         "sketch", "picture of", "recreate"]
+        # Retrieve relevant chunks using hybrid search
+        document_filter = None
+        if request.search_mode == "selected" and request.document_ids:
+            document_filter = request.document_ids
         
-        wants_image = any(keyword in request.query.lower() for keyword in image_keywords)
-        
-        if wants_image:
-            # Execute Phase 2 of workflow (with image generation)
-            logger.info("🎨 Image generation requested - executing Phase 2")
-            
-            phase2_result = await workflow_manager.execute_phase_2(
-                query=request.query,
-                document_ids=request.document_ids if request.search_mode == "selected" else None,
-                output_type="image",
-                upgrade=False
-            )
-            
-            image_filename = phase2_result["result"]["image_filename"]
-            http_image_url = f"http://localhost:8000/images/{image_filename}"
-            
-            return {
-                "answer": f"""I've generated a professional diagram using Google Gemini (Nano Banana).
-
-The diagram accurately represents the information extracted by GPT-5 with:
-• Pixel-perfect accuracy
-• All components and labels
-• Exact colors and styling
-• Spatial relationships preserved
-
-You can download the diagram using the link below.""",
-                "sources": [],
-                "confidence": 1.0,
-                "documents_used": [],
-                "image_url": http_image_url,
-                "diagram_generated": True,
-                "workflow_id": phase2_result["workflow_id"]
-            }
-        
-        else:
-            # Regular text query (no image generation)
-            logger.info("📝 Text query - retrieving and answering")
-            
-            # Retrieve
-            document_filter = None
-            if request.search_mode == "selected" and request.document_ids:
-                document_filter = request.document_ids
-            
-            results = await retriever.retrieve(
-                request.query,
-                request.top_k,
-                document_filter
-            )
-            
-            # Generate answer using GPT-5
-            from openai import AsyncOpenAI
-            openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-            
-            # Build context
-            context = ""
-            for result in results[:10]:
-                context += f"\n[Page {result['page']}] {result['text'][:400]}...\n"
-            
-            prompt = f"""Answer this question based ONLY on the provided context.
-
-Question: {request.query}
-
-Context:
-{context}
-
-Provide a concise, accurate answer with page citations."""
-            
-            response = await openai_client.chat.completions.create(
-                model="gpt-5-nano-2025-08-07",
-                messages=[
-                    {"role": "system", "content": "You are a precise analyst. Answer based only on provided context."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_completion_tokens=800
-            )
-            
-            answer = response.choices[0].message.content
-            
-            # Build sources
-            sources = []
-            for result in results[:5]:
-                sources.append(SourceInfo(
-                    document_id=result['metadata'].get('document_id', ''),
-                    document_name=result['metadata'].get('document_name', 'Unknown'),
-                    page=result['metadata'].get('page', 0),
-                    type=result['metadata'].get('type', 'text'),
-                    relevance_score=float(result.get('final_score', 0)),
-                    excerpt=result['text'][:150] + "..."
-                ))
-            
-            return {
-                "answer": answer,
-                "sources": sources,
-                "confidence": 0.9,
-                "documents_used": list(set(s.document_name for s in sources)),
-                "image_url": None,
-                "diagram_generated": False
-            }
-    
-    except Exception as e:
-        logger.error(f"❌ Error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/test-image-reconstruction")
-async def test_image_reconstruction(
-    file: UploadFile = File(...)
-):
-    """
-    🧪 TEST: Image-to-Text-to-Image Round Trip
-    
-    This is the test mentioned in "My_Expectation"
-    """
-    tmp_path = None
-    try:
-        # Save to temp file
-        suffix = os.path.splitext(file.filename)[1]
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            content = await file.read()
-            tmp.write(content)
-            tmp_path = tmp.name
-        
-        logger.info(f"🧪 Testing image reconstruction: {file.filename}")
-        
-        # Execute test
-        test_result = await workflow_manager.test_image_to_text_to_image(
-            image_path=tmp_path,
-            document_name=file.filename
+        results = await retriever.retrieve(
+            request.query,
+            request.top_k,
+            document_filter
         )
         
+        if not results:
+            logger.warning("⚠️ No results found")
+            return {
+                "answer": "No relevant information found in the uploaded documents.",
+                "sources": [],
+                "confidence": 0.0,
+                "documents_used": []
+            }
+        
+        logger.info(f"✅ Retrieved {len(results)} chunks")
+        
+        # Log what we're sending to the LLM
+        logger.info(f"\n{'='*80}")
+        logger.info(f"📤 CHUNKS BEING SENT TO LLM:")
+        logger.info(f"{'='*80}")
+        
+        for idx, result in enumerate(results, 1):
+            logger.info(f"\n[Chunk {idx}]")
+            logger.info(f"  Page: {result['page']} | Type: {result['type']} | Score: {result.get('final_score', 0):.4f}")
+            logger.info(f"  Preview: {result['text'][:150]}...")
+        
+        # Generate answer using GPT-5
+        from openai import AsyncOpenAI
+        openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        
+        # Build context with clear source attribution
+        context_parts = []
+        for idx, result in enumerate(results[:10], 1):
+            doc_name = result.get('document_name', 'Unknown')
+            page = result.get('page', 'N/A')
+            chunk_type = result.get('type', 'text')
+            text = result.get('text', '')
+            
+            # Limit text length for context window
+            if len(text) > 800:
+                text = text[:800] + "..."
+            
+            context_parts.append(
+                f"[SOURCE {idx} - {doc_name}, Page {page}, Type: {chunk_type}]\n{text}\n"
+            )
+        
+        context = "\n".join(context_parts)
+        
+        logger.info(f"\n📝 Context length: {len(context)} characters")
+        
+        # IMPROVED PROMPT - More explicit instructions
+        prompt = f"""You are analyzing technical documentation to answer a specific question.
+
+QUESTION:
+{request.query}
+
+AVAILABLE SOURCES:
+{context}
+
+INSTRUCTIONS:
+1. READ EVERY SOURCE CAREFULLY - scan all sources before answering
+2. Look for EXACT information requested (numbers, ratios, calculations, specifications)
+3. If you find the answer, extract it PRECISELY and cite the page number
+4. DO NOT say information is "not specified" if it exists in any source
+5. DO NOT make calculations from unrelated hardware specifications
+6. DO NOT assume or infer - only use explicitly stated information
+7. If genuinely not found, say "This specific information is not present in the provided excerpts"
+
+FORMAT YOUR ANSWER:
+- Start with a direct answer to the question
+- Include specific values, numbers, or details from the sources
+- Cite page numbers in format: (Page X)
+- If calculations are requested, show them clearly
+- Be concise but complete
+
+ANSWER:"""
+        
+        logger.info(f"🤖 Calling GPT-5...")
+        
+        # Call OpenAI with proper parameters for reasoning model
+        response = await openai_client.chat.completions.create(
+            model="gpt-5-nano-2025-08-07",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "You are a precise technical document analyst. You extract information exactly as stated in sources and cite page numbers. You never claim information is missing if it exists in the provided text."
+                },
+                {
+                    "role": "user", 
+                    "content": prompt
+                }
+            ],
+            
+            max_completion_tokens=8000  # High limit for reasoning model
+        )
+        
+        # Extract answer with detailed logging
+        logger.info(f"✅ API Response received")
+        logger.info(f"   Model: {response.model}")
+        logger.info(f"   Tokens: {response.usage.total_tokens} (completion: {response.usage.completion_tokens})")
+        logger.info(f"   Finish reason: {response.choices[0].finish_reason}")
+        
+        try:
+            answer = response.choices[0].message.content
+            
+            if answer:
+                logger.info(f"✅ Answer extracted ({len(answer)} chars)")
+                logger.info(f"   Preview: {answer[:200]}...")
+            else:
+                logger.error(f"❌ Answer is empty!")
+                answer = "Error: Received empty response from AI model."
+                
+        except (IndexError, AttributeError) as e:
+            logger.error(f"❌ Failed to extract answer: {e}")
+            answer = "Error: Could not extract answer from API response."
+        
+        # Build sources for response
+        sources = []
+        documents_used = set()
+        
+        for result in results[:5]:
+            doc_id = result.get('document_id', '')
+            doc_name = result.get('document_name', 'Unknown')
+            page = result.get('page', 0)
+            chunk_type = result.get('type', 'text')
+            score = result.get('final_score', 0)
+            text = result.get('text', '')
+            
+            documents_used.add(doc_name)
+            
+            sources.append(SourceInfo(
+                document_id=doc_id,
+                document_name=doc_name,
+                page=page,
+                type=chunk_type,
+                relevance_score=float(score) if score else 0.0,
+                excerpt=text[:200] + "..." if len(text) > 200 else text
+            ))
+        
+        # Calculate confidence based on top score
+        confidence = min(0.95, max(0.5, float(results[0].get('final_score', 0.7)))) if results else 0.5
+        
+        logger.info(f"\n{'='*80}")
+        logger.info(f"✅ QUERY COMPLETE")
+        logger.info(f"   Answer length: {len(answer)} chars")
+        logger.info(f"   Sources: {len(sources)}")
+        logger.info(f"   Confidence: {confidence:.2f}")
+        logger.info(f"{'='*80}\n")
+        
         return {
-            "test_type": "image_to_text_to_image",
-            "original_image": file.filename,
-            "generated_image": test_result["similarity"]["generated_image"],
-            "similarity_score": test_result["similarity"]["similarity_score"],
-            "phase1_workflow_id": test_result["phase1"]["workflow_id"],
-            "phase2_workflow_id": test_result["phase2"]["workflow_id"],
-            "success": test_result["success"]
+            "answer": answer if answer else "No answer generated.",
+            "sources": sources,
+            "confidence": confidence,
+            "documents_used": list(documents_used)
         }
     
     except Exception as e:
-        logger.error(f"❌ Test failed: {str(e)}")
+        logger.error(f"❌ Query Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-    
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
 
 @app.get("/documents", response_model=DocumentListResponse)
 async def list_documents():
@@ -375,19 +337,10 @@ async def delete_document(document_id: str):
 async def health_check():
     return {
         "status": "healthy",
-        "version": "2.0 - Universal GPT-5 + Gemini",
-        "features": [
-            "GPT-5 powered analysis (gpt-5-nano-2025-08-07)",
-            "Gemini (Nano Banana) image generation",
-            "100% accurate reconstruction",
-            "Zero hardcoding",
-            "Modular workflow (10 steps)"
-        ],
+        "version": "3.0 - Production",
         "documents": len(document_registry),
         "models": {
-            "text_analysis": "gpt-5-nano-2025-08-07",
-            "vision_analysis": "gpt-5-nano-2025-08-07",
-            "image_generation": "Google Gemini + Imagen 3.0",
+            "analysis": "gpt-5-nano-2025-08-07",
             "embedding": "text-embedding-3-large"
         }
     }

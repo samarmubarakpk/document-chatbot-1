@@ -1,4 +1,12 @@
-# retrieval_engine.py - Enhanced for multi-document handling
+# retrieval_engine.py - PRODUCTION-READY HYBRID RETRIEVAL ENGINE
+"""
+🚀 HYBRID RETRIEVAL ENGINE
+- Semantic search via embeddings
+- Keyword/BM25 boosting for exact matches
+- Smart scoring without hardcoding
+- Works with ANY document type
+"""
+
 from typing import List, Dict, Any, Optional
 import numpy as np
 from openai import AsyncOpenAI
@@ -8,9 +16,19 @@ from sentence_transformers import CrossEncoder
 import redis
 import json
 import hashlib
+import re
+from collections import Counter
 from app.config import settings
 
 class HybridRetriever:
+    """
+    Production-grade hybrid retrieval combining:
+    1. Dense semantic search (embeddings)
+    2. Sparse keyword search (BM25-style)
+    3. Cross-encoder reranking
+    4. Smart score fusion
+    """
+    
     def __init__(self):
         self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         self.qdrant_client = AsyncQdrantClient(
@@ -18,11 +36,25 @@ class HybridRetriever:
             port=settings.QDRANT_PORT
         )
         self.reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-        self.redis_client = redis.Redis(
-            host=settings.REDIS_HOST,
-            port=settings.REDIS_PORT,
-            db=settings.REDIS_DB
-        )
+        
+        # Redis with error handling
+        try:
+            self.redis_client = redis.Redis(
+                host=settings.REDIS_HOST,
+                port=settings.REDIS_PORT,
+                db=settings.REDIS_DB,
+                socket_connect_timeout=2,
+                socket_timeout=2
+            )
+            # Test connection
+            self.redis_client.ping()
+            self.use_cache = True
+            print("✅ Redis cache enabled")
+        except Exception as e:
+            print(f"⚠️ Redis unavailable: {e}")
+            print("   Continuing without cache...")
+            self.redis_client = None
+            self.use_cache = False
     
     async def retrieve(
         self, 
@@ -30,15 +62,92 @@ class HybridRetriever:
         top_k: int = 10,
         document_filter: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Enhanced retrieval with multi-document handling"""
+        """
+        Main retrieval function with hybrid search
+        
+        Args:
+            query: User's search query
+            top_k: Number of results to return
+            document_filter: Optional list of document IDs to filter
+            
+        Returns:
+            List of ranked results with scores and metadata
+        """
+        
+        print(f"\n{'='*80}")
+        print(f"🔍 HYBRID RETRIEVAL STARTED")
+        print(f"{'='*80}")
+        print(f"Query: {query}")
+        print(f"Top K: {top_k}")
+        print(f"Document filter: {document_filter}")
         
         # Check cache
-        cache_key = self._get_cache_key(query, top_k, document_filter)
-        cached_result = self.redis_client.get(cache_key)
-        if cached_result:
-            return json.loads(cached_result)
+        if self.use_cache:
+            cache_key = self._get_cache_key(query, top_k, document_filter)
+            try:
+                cached_result = self.redis_client.get(cache_key)
+                if cached_result:
+                    print("✅ Cache HIT - returning cached results")
+                    return json.loads(cached_result)
+            except Exception as e:
+                print(f"⚠️ Cache read failed: {e}")
         
-        # Generate embedding
+        # Step 1: SEMANTIC SEARCH (Embedding-based)
+        print(f"\n📊 Step 1: Semantic Search")
+        semantic_results = await self._semantic_search(query, top_k * 5, document_filter)
+        print(f"   Retrieved {len(semantic_results)} candidates")
+        
+        # Step 2: KEYWORD EXTRACTION & BOOSTING
+        print(f"\n🔑 Step 2: Keyword Boosting")
+        keywords = self._extract_keywords(query)
+        print(f"   Extracted keywords: {keywords}")
+        
+        boosted_results = self._apply_keyword_boost(semantic_results, keywords, query)
+        
+        # Step 3: QUERY-SPECIFIC SCORING
+        print(f"\n🎯 Step 3: Smart Scoring")
+        scored_results = self._apply_smart_scoring(boosted_results, query, keywords)
+        
+        # Step 4: CROSS-ENCODER RERANKING
+        print(f"\n🔄 Step 4: Reranking Top Candidates")
+        reranked_results = await self._rerank_with_cross_encoder(
+            query, 
+            scored_results[:top_k * 3],
+            top_k
+        )
+        
+        # Step 5: FINAL RESULTS
+        final_results = reranked_results[:top_k]
+        
+        print(f"\n{'='*80}")
+        print(f"✅ RETRIEVAL COMPLETE - Returning {len(final_results)} results")
+        print(f"{'='*80}")
+        
+        self._print_final_results(final_results)
+        
+        # Cache results
+        if self.use_cache:
+            try:
+                self.redis_client.setex(
+                    cache_key, 
+                    3600,  # 1 hour
+                    json.dumps(final_results)
+                )
+            except Exception as e:
+                print(f"⚠️ Cache write failed: {e}")
+        
+        return final_results
+    
+    async def _semantic_search(
+        self,
+        query: str,
+        limit: int,
+        document_filter: Optional[List[str]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform semantic search using embeddings
+        """
+        # Generate query embedding
         query_embedding = await self._get_embedding(query)
         
         # Build filter
@@ -53,155 +162,217 @@ class HybridRetriever:
                 ]
             )
         
-        # Dense retrieval
+        # Search Qdrant
         search_results = await self.qdrant_client.search(
             collection_name="documents",
             query_vector=query_embedding,
-            limit=top_k * 5,
+            limit=limit,
             query_filter=search_filter
         )
         
-        # Extract candidates
+        # Convert to standard format
         candidates = []
         for result in search_results:
             candidates.append({
                 "id": result.id,
-                "text": result.payload["text"],
-                "score": result.score,
-                "metadata": result.payload,
+                "text": result.payload.get("text", ""),
+                "semantic_score": float(result.score),
+                "metadata": result.payload.get("metadata", {}),
                 "page": result.payload.get("page", 0),
                 "type": result.payload.get("type", "text"),
                 "document_name": result.payload.get("document_name", ""),
                 "document_id": result.payload.get("document_id", "")
             })
         
-        unique_docs = len(set(c['document_name'] for c in candidates))
-        print(f"\n=== Retrieved {len(candidates)} candidates from {unique_docs} documents ===")
+        return candidates
+    
+    def _extract_keywords(self, query: str) -> List[str]:
+        """
+        Extract important keywords from query
+        - Numbers (ratios, values, measurements)
+        - Technical terms
+        - Capitalized acronyms
+        - Multi-word technical phrases
+        """
+        keywords = []
         
-        # GROUP BY DOCUMENT AND PAGE
-        doc_page_groups = {}
+        # Extract numbers with context (e.g., "20:1", "4.8Gbps", "10GE")
+        number_patterns = [
+            r'\d+:\d+',           # Ratios: 20:1
+            r'\d+\.?\d*\s*[A-Za-z]+',  # Numbers with units: 4.8Gbps, 10GE
+            r'\d+',               # Plain numbers
+        ]
+        
+        for pattern in number_patterns:
+            matches = re.findall(pattern, query)
+            keywords.extend(matches)
+        
+        # Extract capitalized acronyms (e.g., LAN, OSPF, VLAN)
+        acronyms = re.findall(r'\b[A-Z]{2,}\b', query)
+        keywords.extend(acronyms)
+        
+        # Extract quoted phrases
+        quoted = re.findall(r'"([^"]+)"', query)
+        keywords.extend(quoted)
+        
+        # Extract technical terms (words with 4+ chars that aren't common words)
+        common_words = {'what', 'how', 'why', 'when', 'where', 'which', 'does', 'this', 
+                       'that', 'these', 'those', 'with', 'from', 'have', 'been', 'their'}
+        
+        words = re.findall(r'\b\w{4,}\b', query.lower())
+        technical_terms = [w for w in words if w not in common_words]
+        keywords.extend(technical_terms)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_keywords = []
+        for k in keywords:
+            k_lower = k.lower()
+            if k_lower not in seen:
+                seen.add(k_lower)
+                unique_keywords.append(k)
+        
+        return unique_keywords
+    
+    def _apply_keyword_boost(
+        self,
+        candidates: List[Dict],
+        keywords: List[str],
+        query: str
+    ) -> List[Dict]:
+        """
+        Boost scores for chunks containing important keywords
+        """
         for candidate in candidates:
-            doc_id = candidate['document_id']
-            page = candidate['page']
-            doc_page_key = f"{doc_id}_Page{page}"
+            text = candidate['text'].lower()
+            keyword_score = 0
             
-            if doc_page_key not in doc_page_groups:
-                doc_page_groups[doc_page_key] = {
-                    'document_id': doc_id,
-                    'document_name': candidate['document_name'],
-                    'page': page,
-                    'chunks': []
-                }
+            # Exact keyword matches (case-insensitive)
+            for keyword in keywords:
+                keyword_lower = keyword.lower()
+                
+                # Count occurrences
+                count = text.count(keyword_lower)
+                
+                if count > 0:
+                    # Base boost per occurrence
+                    base_boost = 0.05
+                    
+                    # Extra boost for rare/specific terms
+                    if len(keyword) > 6 or re.match(r'\d', keyword):
+                        base_boost = 0.1  # Numbers and long terms are more important
+                    
+                    keyword_score += base_boost * count
             
-            doc_page_groups[doc_page_key]['chunks'].append(candidate)
-        
-        print(f"Grouped into {len(doc_page_groups)} document-page combinations")
-        
-        # Calculate page scores with document diversity
-        page_scores = {}
-        
-        for doc_page_key, page_data in doc_page_groups.items():
-            chunks = page_data['chunks']
+            # Boost for exact phrase match
+            if query.lower() in text:
+                keyword_score += 0.2
             
-            # Separate by type
-            text_chunks = [c for c in chunks if c['type'] in ['text', 'hardware_spec']]
-            visual_chunks = [c for c in chunks if c['type'] == 'visual']
-            hardware_chunks = [c for c in chunks if c['type'] == 'hardware_spec']
+            candidate['keyword_score'] = keyword_score
+            candidate['boosted_score'] = candidate['semantic_score'] + keyword_score
+        
+        # Sort by boosted score
+        candidates.sort(key=lambda x: x['boosted_score'], reverse=True)
+        
+        return candidates
+    
+    def _apply_smart_scoring(
+        self,
+        candidates: List[Dict],
+        query: str,
+        keywords: List[str]
+    ) -> List[Dict]:
+        """
+        Apply intelligent scoring based on:
+        - Chunk type (text vs visual)
+        - Content density
+        - Answer likelihood
+        """
+        
+        # Detect query type
+        is_asking_for_calculation = any(word in query.lower() for word in 
+                                        ['calculate', 'calculation', 'show', 'compute', 'how much'])
+        is_asking_for_visual = any(word in query.lower() for word in 
+                                   ['diagram', 'draw', 'visualize', 'image', 'picture', 'topology'])
+        is_asking_for_specs = any(word in query.lower() for word in 
+                                  ['specification', 'hardware', 'model', 'equipment'])
+        
+        for candidate in candidates:
+            chunk_type = candidate['type']
+            text = candidate['text']
             
             # Base score
-            avg_score = sum(c['score'] for c in chunks) / len(chunks)
+            score = candidate['boosted_score']
             
-            # Boosts
-            diversity_boost = 0.15 if (text_chunks and visual_chunks) else 0
-            multi_chunk_boost = min(len(chunks) * 0.05, 0.2)
-            hardware_boost = 0.1 if hardware_chunks else 0
+            # Type-based adjustments
+            if is_asking_for_visual and chunk_type == 'visual':
+                score += 0.15  # Boost visual chunks for diagram questions
+            elif not is_asking_for_visual and chunk_type == 'text':
+                score += 0.1   # Boost text chunks for factual questions
             
-            visual_boost = 0.0
-            if visual_chunks:
-                for vc in visual_chunks:
-                    if vc['metadata'].get('metadata', {}).get('key_elements', []):
-                        visual_boost = 0.1
-                        break
+            # Content quality signals
             
-            final_score = avg_score + diversity_boost + multi_chunk_boost + hardware_boost + visual_boost
+            # Has numbers (good for calculation/spec questions)
+            if re.search(r'\d+', text) and (is_asking_for_calculation or is_asking_for_specs):
+                score += 0.05
             
-            page_scores[doc_page_key] = {
-                'base_score': avg_score,
-                'final_score': final_score,
-                'chunks': chunks,
-                'document_id': page_data['document_id'],
-                'document_name': page_data['document_name'],
-                'page': page_data['page']
-            }
+            # Has technical terms from metadata
+            if candidate['metadata']:
+                metadata_str = str(candidate['metadata']).lower()
+                if any(kw.lower() in metadata_str for kw in keywords):
+                    score += 0.05
+            
+            # Length considerations
+            text_length = len(text)
+            if 100 < text_length < 2000:
+                # Sweet spot - not too short, not too long
+                score += 0.03
+            elif text_length < 50:
+                # Very short chunks are usually less useful
+                score -= 0.05
+            
+            candidate['smart_score'] = score
         
-        # Sort pages
-        sorted_pages = sorted(
-            page_scores.items(),
-            key=lambda x: x[1]['final_score'],
-            reverse=True
-        )
+        # Re-sort by smart score
+        candidates.sort(key=lambda x: x['smart_score'], reverse=True)
         
-        # Print distribution
-        print(f"\n=== Document Distribution in Top Results ===")
-        doc_count = {}
-        for _, page_data in sorted_pages[:10]:
-            doc_name = page_data['document_name']
-            doc_count[doc_name] = doc_count.get(doc_name, 0) + 1
+        return candidates
+    
+    async def _rerank_with_cross_encoder(
+        self,
+        query: str,
+        candidates: List[Dict],
+        top_k: int
+    ) -> List[Dict]:
+        """
+        Use cross-encoder for final reranking of top candidates
+        """
+        if not candidates:
+            return []
         
-        for doc_name, count in doc_count.items():
-            print(f"  📄 {doc_name}: {count} pages")
+        print(f"   Reranking {len(candidates)} candidates...")
         
-        # Flatten to chunks
-        reordered_candidates = []
-        for doc_page_key, page_data in sorted_pages:
-            page_chunks = sorted(
-                page_data['chunks'],
-                key=lambda x: (
-                    0 if x['type'] == 'hardware_spec' else (1 if x['type'] == 'text' else 2),
-                    -x['score']
-                )
+        # Prepare pairs for cross-encoder
+        pairs = [(query, candidate['text']) for candidate in candidates]
+        
+        # Get reranking scores
+        rerank_scores = self.reranker.predict(pairs)
+        
+        # Update candidates with rerank scores
+        for i, candidate in enumerate(candidates):
+            candidate['rerank_score'] = float(rerank_scores[i])
+            
+            # Final score: weighted combination
+            candidate['final_score'] = (
+                0.3 * candidate['semantic_score'] +    # Semantic similarity
+                0.3 * candidate.get('keyword_score', 0) +  # Keyword match
+                0.4 * candidate['rerank_score']         # Cross-encoder (most weight)
             )
-            reordered_candidates.extend(page_chunks)
         
-        # Rerank
-        if reordered_candidates:
-            candidates_to_rerank = reordered_candidates[:top_k * 3]
-            texts = [c["text"] for c in candidates_to_rerank]
-            
-            print(f"\n=== Reranking {len(candidates_to_rerank)} candidates ===")
-            
-            rerank_scores = self.reranker.predict(
-                [(query, text) for text in texts]
-            )
-            
-            for i, candidate in enumerate(candidates_to_rerank):
-                candidate["rerank_score"] = float(rerank_scores[i])
-                candidate["final_score"] = (
-                    0.3 * candidate["score"] + 
-                    0.7 * candidate["rerank_score"]
-                )
-            
-            candidates_to_rerank.sort(key=lambda x: x["final_score"], reverse=True)
-            final_candidates = candidates_to_rerank[:top_k]
-        else:
-            final_candidates = []
+        # Final sort
+        candidates.sort(key=lambda x: x['final_score'], reverse=True)
         
-        # Print final results
-        print(f"\n=== Final Top {len(final_candidates)} Results ===")
-        current_doc = None
-        for i, candidate in enumerate(final_candidates, 1):
-            doc_name = candidate['document_name']
-            if doc_name != current_doc:
-                print(f"\n📄 {doc_name}")
-                current_doc = doc_name
-            
-            type_emoji = "📝" if candidate['type'] == "text" else ("🔧" if candidate['type'] == "hardware_spec" else "🖼️")
-            print(f"  {i}. {type_emoji} Page {candidate['page']} - Score: {candidate['final_score']:.4f}")
-        
-        # Cache
-        self.redis_client.setex(cache_key, 3600, json.dumps(final_candidates))
-        
-        return final_candidates
+        return candidates[:top_k]
     
     async def delete_document(self, document_id: str):
         """Delete all chunks for a document"""
@@ -219,7 +390,7 @@ class HybridRetriever:
         print(f"✅ Deleted all chunks for document {document_id}")
     
     async def _get_embedding(self, text: str) -> List[float]:
-        """Generate embedding"""
+        """Generate embedding using OpenAI"""
         response = await self.openai_client.embeddings.create(
             model=settings.OPENAI_EMBEDDING_MODEL,
             input=text
@@ -227,9 +398,25 @@ class HybridRetriever:
         return response.data[0].embedding
     
     def _get_cache_key(self, query: str, top_k: int, document_filter: Optional[List[str]]) -> str:
-        """Generate cache key"""
+        """Generate cache key for query"""
         key_parts = [query, str(top_k)]
         if document_filter:
             key_parts.extend(sorted(document_filter))
         key_string = "_".join(key_parts)
         return f"query_cache:{hashlib.md5(key_string.encode()).hexdigest()}"
+    
+    def _print_final_results(self, results: List[Dict]):
+        """Print final results for debugging"""
+        print(f"\n📊 FINAL TOP {len(results)} RESULTS:")
+        print(f"{'='*80}")
+        
+        for i, result in enumerate(results, 1):
+            print(f"\n{i}. 📄 {result['document_name']} - Page {result['page']}")
+            print(f"   Type: {result['type']}")
+            print(f"   Semantic: {result['semantic_score']:.4f} | "
+                  f"Keyword: {result.get('keyword_score', 0):.4f} | "
+                  f"Rerank: {result.get('rerank_score', 0):.4f}")
+            print(f"   ⭐ FINAL SCORE: {result['final_score']:.4f}")
+            print(f"   Preview: {result['text'][:150]}...")
+        
+        print(f"\n{'='*80}\n")
