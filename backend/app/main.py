@@ -274,8 +274,7 @@ Provide a concise, accurate answer with page citations."""
                     {"role": "system", "content": "You are a precise analyst. Answer based only on provided context."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.0,
-                max_tokens=800
+                max_completion_tokens=800
             )
             
             answer = response.choices[0].message.content

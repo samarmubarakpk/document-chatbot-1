@@ -308,8 +308,7 @@ ANALYZE THIS PAGE NOW:"""
                         ]
                     }
                 ],
-                max_tokens=8000,  # Allow very long responses
-                temperature=0.1,  # Low for consistency
+                max_completion_tokens=8000,  # Allow very long responses
                 response_format={"type": "json_object"}  # Force JSON output
             )
             
